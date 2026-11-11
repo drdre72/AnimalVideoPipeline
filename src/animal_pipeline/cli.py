@@ -73,9 +73,11 @@ def parser() -> argparse.ArgumentParser:
     exp.add_argument("--dry-run", action="store_true")
     queue = sub.add_parser("queue", help="Queue one serial render job idempotently")
     queue.add_argument("plan_id")
-    retry = sub.add_parser("retry", help="Retry a failed job up to three attempts")
+    retry = sub.add_parser("retry", help="Retry a failed job within the attempts bound")
     retry.add_argument("job_id")
-    sub.add_parser("run", help="Recover and process one bounded queue batch")
+    run = sub.add_parser("run", help="Recover, enqueue ready plans and drain one bounded batch")
+    run.add_argument("--limit", type=int,
+                     help="Maximum jobs to process this batch (default: queue bound)")
     srv = sub.add_parser("serve", help="Read-only local review UI on 127.0.0.1")
     srv.add_argument("--port", type=int, default=8787)
     perf = sub.add_parser("analytics", help="Import or report authorized local analytics JSON")
@@ -169,8 +171,15 @@ def dispatch(args: argparse.Namespace) -> object:
         if args.command == "retry":
             return {"requeued": scheduler.retry(conn, args.job_id)}
         if args.command == "run":
+            cfg = settings()
+            ready = conn.execute(
+                "SELECT id FROM plans WHERE status='SCRIPT_READY' ORDER BY created_at LIMIT ?",
+                (cfg["production"]["daily_review_target"],)).fetchall()
+            enqueued = sum(1 for row in ready if scheduler.enqueue(conn, "render", row["id"]))
             recovered = scheduler.recover(conn)
-            return {"recovered": recovered, "jobs": asyncio.run(scheduler.drain(conn, editor.compose))}
+            limit = args.limit or cfg["workers"]["queue_size"]
+            return {"enqueued": enqueued, "recovered": recovered,
+                    "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
         if args.command == "serve":
             return server.serve(port=args.port)
         if args.command == "analytics":

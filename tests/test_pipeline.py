@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 import sys
@@ -128,6 +129,56 @@ def test_queue_recovery_and_idempotence(conn, setup):
     conn.execute("UPDATE jobs SET status='running'")
     assert scheduler.recover(conn) == 1
     assert scheduler.recover(conn) == 0
+
+
+def test_fresh_running_claim_survives_but_stale_claim_recovers(conn, setup):
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    scheduler.enqueue(conn, "render", identifier)
+    job = conn.execute("SELECT id FROM jobs").fetchone()[0]
+    conn.execute("UPDATE jobs SET status='running',claimed_at=? WHERE id=?",
+                 (datetime.now(timezone.utc).isoformat(), job))
+    assert scheduler.recover(conn) == 0
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=7200)).isoformat()
+    conn.execute("UPDATE jobs SET claimed_at=? WHERE id=?", (stale, job))
+    assert scheduler.recover(conn) == 1
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()[0] == "queued"
+
+
+def test_recovery_is_bounded_by_attempts(conn, setup):
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    scheduler.enqueue(conn, "render", identifier)
+    job = conn.execute("SELECT id FROM jobs").fetchone()[0]
+    stale = (datetime.now(timezone.utc) - timedelta(seconds=7200)).isoformat()
+    conn.execute("UPDATE jobs SET status='running',attempts=3,claimed_at=? WHERE id=?",
+                 (stale, job))
+    scheduler.recover(conn)
+    row = conn.execute("SELECT status,error FROM jobs WHERE id=?", (job,)).fetchone()
+    assert row["status"] == "failed" and "exhausted" in row["error"]
+    conn.execute("UPDATE jobs SET status='failed',attempts=1 WHERE id=?", (job,))
+    assert scheduler.recover(conn) == 1
+    conn.execute("UPDATE jobs SET status='failed',attempts=3 WHERE id=?", (job,))
+    assert scheduler.recover(conn) == 0
+
+
+def test_drain_records_claim_and_bounds_the_batch(conn, setup):
+    topic, fact, asset = setup
+    first = creative.save_plan(conn, plan(topic, fact, asset))
+    second = creative.save_plan(conn, plan(topic, fact, asset))
+    scheduler.enqueue(conn, "render", first)
+    scheduler.enqueue(conn, "render", second)
+    results = asyncio.run(scheduler.drain(conn, lambda c, target: {"ok": target}, limit=1))
+    assert len(results) == 1 and results[0]["result"] == {"ok": first}
+    done = conn.execute("SELECT status,claimed_at FROM jobs WHERE target_id=?", (first,)).fetchone()
+    assert done["status"] == "done" and done["claimed_at"]
+    assert conn.execute("SELECT status FROM jobs WHERE target_id=?",
+                        (second,)).fetchone()[0] == "queued"
+
+
+def test_queue_rejects_unknown_render_target(conn):
+    with pytest.raises(ValueError, match="unknown render target"):
+        scheduler.enqueue(conn, "render", "plan_missing")
 
 
 def test_rank_prefers_approved_visuals(conn, setup):

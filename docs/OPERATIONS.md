@@ -32,12 +32,24 @@ For footage shorter than the default 61-second target, `draft <plan.json>
 an explicit editorial exception for a 20–70-second Short. This does not
 bypass fact, rights, captions, audio, QC or exact-revision review.
 
-Current limits: operator-assisted topic entry and evidence approval, no remote
-research/discovery or footage download, no resident TTS worker, no local
-preview UI or launchd installation, no automatic publication, and no
-source-specific platform API analytics. Performance imports are local JSON.
-Voice and Metal inference performance have not been validated in this project.
-Disk availability and current hardware status appear in `doctor`.
+`run` is one bounded batch: it enqueues `SCRIPT_READY` plans up to
+`production.daily_review_target`, recovers stale `running` jobs (claimed
+longer than `workers.stale_after_s`, or claimed before `claimed_at` existed)
+and requeues `failed` jobs that still have attempts under
+`workers.max_attempts`, then drains queued jobs serially up to
+`workers.queue_size` (`--limit` narrows it). A running job claimed recently is
+never stolen by a second `run`; a stale job out of attempts fails permanently.
+Enqueueing is idempotent on `(kind, target_id)`, so repeat runs do not
+duplicate work. Rendering stays serial: one VideoToolbox encode and one
+SQLite writer at a time on this hardware.
+
+Current limits: operator-assisted topic entry and evidence approval, no
+remote fact research (Commons media discovery is the only network path and
+requires explicit `--allow-network`), no resident TTS worker, no launchd
+installation, no automatic publication, and no source-specific platform API
+analytics. Performance imports are local JSON. Voice and Metal inference
+performance have not been validated in this project. Disk availability and
+current hardware status appear in `doctor`.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
 queue, per-revision video, blocking checks, script and manifest. It opens

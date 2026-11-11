@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS plans (
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_id TEXT NOT NULL,
  status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
- error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+ error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, claimed_at TEXT,
  UNIQUE(kind,target_id)
 );
 CREATE TABLE IF NOT EXISTS analytics (
@@ -101,6 +101,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
+    if "claimed_at" not in {row["name"] for row in
+                          conn.execute("PRAGMA table_info(jobs)")}:
+        conn.execute("ALTER TABLE jobs ADD COLUMN claimed_at TEXT")
     return conn
 
 
