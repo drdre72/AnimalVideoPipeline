@@ -8,7 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .core import ROOT, connect
+from .budget import footage_budget
+from .core import ROOT, connect, settings
+from .creative import rank_topics
+from .report import weekly
 from .review import PLATFORMS, review_errors
 
 
@@ -52,7 +55,8 @@ def queue_page(conn: sqlite3.Connection) -> str:
         "(SELECT COUNT(*) FROM assets WHERE approved=0)").fetchone()[0]
     body = ("<h2>Review queue</h2><table><tr><th>Subject</th><th>Rev</th>"
             "<th>Status</th><th>Created (UTC)</th></tr>" + lines + "</table>"
-            f"<p><a href='/triage'>{pending} item(s) awaiting verification</a> — "
+            f"<p><a href='/triage'>{pending} item(s) awaiting verification</a> · "
+            "<a href='/dashboard'>Dashboard</a> · <a href='/report'>Weekly report</a> — "
             "approval and export commands are prefilled on each revision page.</p>")
     return _page("Queue", body)
 
@@ -121,6 +125,107 @@ def triage_page(conn: sqlite3.Connection) -> str:
     return _page("Triage", body)
 
 
+def dashboard_page(conn: sqlite3.Connection) -> str:
+    ranked = rank_topics(conn)[:8]
+    budget_rows = ""
+    for topic in ranked:
+        try:
+            budget = footage_budget(conn, topic["id"])
+            detail = (f"{budget['profile']} · {budget['total_usable_s']:.1f}s usable · "
+                      f"{len(budget['assets'])} asset(s)")
+        except ValueError:
+            detail = "budget unavailable"
+        signals = topic["reasons"].get("signals", {})
+        budget_rows += (f"<tr><td>{_esc(topic['species'])}</td><td>{_esc(round(topic['score'], 1))}</td>"
+                        f"<td>{_esc(detail)}</td>"
+                        f"<td><small>{_esc(topic['reasons'].get('formula', ''))} · "
+                        f"{_esc(', '.join(f'{k}={v}' for k, v in topic['reasons'].get('contributions', {}).items()))}</small></td></tr>")
+    awaiting = conn.execute(
+        "SELECT p.id,p.status,p.revision,t.species FROM plans p JOIN topics t ON t.id=p.topic_id "
+        "WHERE p.status IN ('SCRIPT_READY','QC_FAILED','CHANGES_REQUESTED') ORDER BY p.created_at DESC"
+    ).fetchall()
+    awaiting_rows = "".join(
+        f"<tr><td><a href='/review/{_esc(r['id'])}'>{_esc(r['species'])}</a></td>"
+        f"<td>r{_esc(r['revision'])}</td><td><span class='badge'>{_esc(r['status'])}</span></td></tr>"
+        for r in awaiting)
+    running = conn.execute(
+        "SELECT kind,target_id,attempts,claimed_at FROM jobs WHERE status='running'").fetchall()
+    last_run = conn.execute("SELECT started_at,finished_at,summary FROM runs "
+                            "ORDER BY started_at DESC LIMIT 1").fetchone()
+    failed = conn.execute(
+        "SELECT kind,target_id,attempts,error FROM jobs WHERE status='failed' "
+        "ORDER BY created_at DESC LIMIT 5").fetchall()
+    failed_rows = "".join(
+        f"<tr><td>{_esc(j['kind'])}</td><td>{_esc(j['attempts'])}</td>"
+        f"<td><small>{_esc(j['error'][:160])}</small></td></tr>" for j in failed)
+    exportable = conn.execute(
+        "SELECT p.id,t.species,p.revision FROM plans p JOIN topics t ON t.id=p.topic_id "
+        "WHERE p.status='APPROVED'").fetchall()
+    export_rows = "".join(
+        f"<li><a href='/review/{_esc(r['id'])}'>{_esc(r['species'])} r{_esc(r['revision'])}</a></li>"
+        for r in exportable)
+    videos = conn.execute(
+        "SELECT video_id,plan_id,title,published_at FROM youtube_videos ORDER BY published_at DESC LIMIT 10"
+    ).fetchall()
+    video_rows = ""
+    for video in videos:
+        snap = conn.execute(
+            "SELECT views,observed_at,subscribers FROM analytics WHERE video_id=? "
+            "ORDER BY observed_at DESC LIMIT 1", (video["video_id"],)).fetchone()
+        video_rows += (f"<tr><td>{_esc(video['title'][:40])}</td>"
+                       f"<td><code>{_esc(video['video_id'])}</code></td>"
+                       f"<td>{_esc(snap['views'] if snap else '—')}</td>"
+                       f"<td>{_esc((snap['observed_at'] or '')[:10] if snap else '—')}</td></tr>")
+    subscribers = conn.execute(
+        "SELECT COALESCE(SUM(subscribers),0) FROM (SELECT subscribers FROM analytics "
+        "WHERE subscribers IS NOT NULL GROUP BY video_id,platform HAVING "
+        "observed_at=MAX(observed_at))").fetchone()[0]
+    free_gb = round(__import__("shutil").disk_usage(ROOT).free / 1024**3, 1)
+    stage = (f"running job(s): {len(running)}" if running else
+             (f"last run {last_run['started_at'][:19]}"
+              + (" (unfinished)" if last_run and not last_run["finished_at"] else "")
+              if last_run else "no runs yet"))
+    body = (f"<h2>Operator dashboard</h2>"
+            f"<h3>Active stage</h3><p>{_esc(stage)} · free disk {_esc(free_gb)} GB</p>"
+            f"<h3>Top research candidates</h3><table><tr><th>Topic</th><th>Score</th>"
+            f"<th>Footage</th><th>Signals</th></tr>{budget_rows or '<tr><td>none</td></tr>'}</table>"
+            f"<h3>Drafts awaiting attention</h3><table>{awaiting_rows or '<tr><td>none</td></tr>'}</table>"
+            f"<h3>Render failures &amp; retry reasons</h3><table>{failed_rows or '<tr><td>none</td></tr>'}</table>"
+            f"<h3>Export-ready</h3><ul>{export_rows or '<li>none</li>'}</ul>"
+            f"<h3>Published videos</h3><table><tr><th>Title</th><th>ID</th><th>Views</th>"
+            f"<th>Observed</th></tr>{video_rows or '<tr><td colspan=4>none tracked</td></tr>'}</table>"
+            f"<p><small>Subscriber gain observed: {_esc(subscribers)} · "
+            f"<a href='/report'>weekly optimization report</a></small></p>")
+    return _page("Dashboard", body)
+
+
+def report_page(conn: sqlite3.Connection) -> str:
+    data = weekly(conn)
+    top = "".join(f"<tr><td><code>{_esc(v['video_id'])}</code></td><td>{_esc(v['platform'])}</td>"
+                  f"<td>{_esc(v['views'])}</td><td>{_esc(v['views_per_day'])}/day</td>"
+                  f"<td><small>{_esc(v['source'])}</small></td></tr>" for v in data["top_videos"])
+    experiments = "".join(f"<tr><td>{_esc(e['topic'])}</td><td>{_esc(e['kind'])}</td>"
+                          f"<td><small>{_esc(e['detail'])}</small></td></tr>"
+                          for e in data["experiments"])
+    failures = "".join(f"<tr><td>{_esc(f['kind'])}</td><td>{_esc(f['attempts'])}</td>"
+                       f"<td><small>{_esc(f['error'][:160])}</small></td></tr>"
+                       for f in data["render_failures"])
+    pipeline = ", ".join(f"{_esc(k)}: {_esc(v)}" for k, v in sorted(data["pipeline"].items()))
+    channel = data["channel"]
+    body = (f"<h2>Weekly optimization report</h2>"
+            f"<p><small>generated {_esc(data['generated_at'][:19])} · {_esc(data['period_days'])}-day view · "
+            f"{_esc(data['note'])}</small></p>"
+            f"<h3>Performance</h3><table><tr><th>Video</th><th>Platform</th><th>Views</th>"
+            f"<th>Velocity</th><th>Source</th></tr>{top or '<tr><td colspan=5>no observed data</td></tr>'}</table>"
+            f"<p>Tracked videos: {_esc(channel['tracked_videos'])} · "
+            f"observed subscriber gain: {_esc(channel['subscriber_gain_observed'])} · "
+            f"median velocity: {_esc(channel['median_views_per_day'])}/day</p>"
+            f"<h3>Failures</h3><table>{failures or '<tr><td>none</td></tr>'}</table>"
+            f"<h3>Pipeline</h3><p>{pipeline or 'no plans'}</p>"
+            f"<h3>Recommended experiments</h3><table>{experiments or '<tr><td>none</td></tr>'}</table>")
+    return _page("Weekly report", body)
+
+
 def make_handler(db_path: Path | None):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, content: bytes, mime: str = "text/html; charset=utf-8"):
@@ -151,6 +256,10 @@ def make_handler(db_path: Path | None):
                     return self._send(200, queue_page(conn).encode())
                 if path == "/triage":
                     return self._send(200, triage_page(conn).encode())
+                if path == "/dashboard":
+                    return self._send(200, dashboard_page(conn).encode())
+                if path == "/report":
+                    return self._send(200, report_page(conn).encode())
                 if path.startswith("/review/"):
                     target = path[len("/review/"):].split("/")[0]
                     return self._send(200, review_page(conn, target).encode())

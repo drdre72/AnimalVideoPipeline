@@ -80,6 +80,10 @@ def test_multi_day_desk_cycle(tmp_path, monkeypatch, footage):
     results = asyncio.run(scheduler.drain(conn, editor.compose, limit=4))
     assert results[0]["result"]["qc"]["ok"]
     assert results[0]["result"]["qc"]["checks"]["loudness"]
+    snapshot = results[0]["result"]["manifest"]["evidence_snapshot"]
+    assert {f["id"] for f in snapshot["facts"]} == set(facts)
+    assert all(f["status"] == "approved" and f["sha256"] for f in snapshot["facts"])
+    assert snapshot["assets"][0]["sha256"]
     row = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     assert row["status"] == "READY_FOR_REVIEW" and not review.review_errors(conn, row)
     review.approve(conn, plan_id, row["video_hash"],

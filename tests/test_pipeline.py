@@ -733,6 +733,18 @@ def argparse_for(*argv):
     return parser.parse_args(list(argv))
 
 
+def test_dashboard_and_report_pages_render_pipeline_state(conn, setup, tmp_path):
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    page = server.dashboard_page(conn)
+    assert "Operator dashboard" in page and "Fixture animal" in page
+    assert "MICRO" in page or "NEEDS_MEDIA" in page or "usable" in page
+    assert "Drafts awaiting attention" in page and identifier in page
+    report = server.report_page(conn)
+    assert "Weekly optimization report" in report and "not causal" in report
+    assert "Recommended experiments" in report
+
+
 def test_review_ui_serves_over_http(conn, setup, tmp_path):
     import threading
     import urllib.request

@@ -14,6 +14,11 @@ from .evidence import validate_segments
 from .media import probe, rights_errors
 
 
+def digest_statements(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def _ffmpeg(args: list[str]) -> None:
     result = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
                             capture_output=True, text=True, timeout=1800)
@@ -142,9 +147,19 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         os.replace(part, out)
     finally:
         part.unlink(missing_ok=True)
+    evidence_snapshot = {
+        "facts": [{"id": f["id"], "status": f["status"],
+                   "sha256": digest_statements(f["statement"] + f["excerpt"])}
+                  for f in (conn.execute("SELECT * FROM facts WHERE id=?",
+                                         (fid,)).fetchone()
+                            for fid in {fid for s in plan["segments"]
+                                        for fid in s["fact_ids"]})],
+        "assets": [{"id": a["id"], "sha256": a["sha256"], "license": a["license_type"],
+                    "approved": a["approved"]} for a in clips]}
     manifest = {"brand": "Naminal Hub", "plan_id": plan_id, "revision": row["revision"],
                 "plan_hash": row["hash"], "video_hash": digest(out),
-                "narration_hash": digest(narration), "assets": [
+                "narration_hash": digest(narration),
+                "evidence_snapshot": evidence_snapshot, "assets": [
                     {"id": a["id"], "sha256": a["sha256"], "creator": a["creator"],
                      "license": a["license_type"], "evidence": a["evidence"],
                      "attribution": a["attribution"]} for a in clips],
