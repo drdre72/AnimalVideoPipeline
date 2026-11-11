@@ -14,6 +14,19 @@ workers:
   video: 1
 production:
   daily_review_target: 2
+ranking:
+  formula_version: v2
+  outlier_views_per_day: 500
+  weights:
+    evidence: 2.0
+    footage: 10.0
+    specificity: 2.0
+    rights: 5.0
+    own_performance: 8.0
+    comparable_demand: 4.0
+    novelty: 3.0
+    behavior: 2.0
+    cost: -2.0
 service:
   interval_s: 3600
   run_limit: 2

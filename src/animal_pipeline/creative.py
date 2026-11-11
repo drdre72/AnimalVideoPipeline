@@ -34,23 +34,83 @@ def _topic_feedback(conn: sqlite3.Connection, topic_id: str) -> float | None:
     return sorted(rates)[len(rates) // 2] if rates else None
 
 
+def _comparable_demand(conn: sqlite3.Connection, species: str) -> float | None:
+    keyword = species.split()[0].lower()
+    if len(keyword) < 3:
+        return None
+    rates = []
+    for row in conn.execute("SELECT title,uploaded_at,observed_at,views FROM competitors"):
+        if keyword not in (row["title"] or "").lower():
+            continue
+        days = max(1.0, (datetime.fromisoformat(row["observed_at"]) -
+                         datetime.fromisoformat(row["uploaded_at"])).total_seconds() / 86400)
+        rates.append(row["views"] / days)
+    return sorted(rates)[len(rates) // 2] if rates else None
+
+
 def rank_topics(conn: sqlite3.Connection) -> list[dict]:
+    cfg = settings().get("ranking", {})
+    weights = cfg.get("weights", {})
+    formula = cfg.get("formula_version", "v2")
+    outlier_cap = float(cfg.get("outlier_views_per_day", 500))
+    exported_pillars = {row["pillar"] for row in conn.execute(
+        "SELECT DISTINCT t.pillar FROM topics t JOIN plans p ON p.topic_id=t.id "
+        "WHERE p.status='EXPORTED'")}
     results = []
     for topic in conn.execute("SELECT * FROM topics"):
         facts = conn.execute("SELECT COUNT(*) FROM facts WHERE topic_id=? AND status='approved'",
                              (topic["id"],)).fetchone()[0]
-        assets = [a for a in conn.execute("SELECT * FROM assets")
-                  if species_match(topic["species"], a["species"]) and not rights_errors(a)]
-        views_per_day = _topic_feedback(conn, topic["id"])
-        boost = min(views_per_day / 50, 8) if views_per_day else 0.0
-        score = min(facts, 5) * 2 + min(len(assets), 3) * 5 + boost
+        matching = [a for a in conn.execute("SELECT * FROM assets")
+                    if species_match(topic["species"], a["species"])]
+        assets = [a for a in matching if not rights_errors(a)]
         usable = sum(a["duration"] for a in assets)
-        reasons = {"approved_facts": facts, "usable_visuals": len(assets),
-                   "usable_footage_s": round(usable, 1),
+        exact = sum(1 for a in assets if a["species"] == topic["species"])
+        views_per_day = _topic_feedback(conn, topic["id"])
+        comparable = _comparable_demand(conn, topic["species"])
+        signals = {
+            "evidence": {"value": min(facts, 5), "basis": "observed",
+                       "note": f"{facts} approved facts, capped at 5"},
+            "footage": {"value": round(min(usable, 60) / 60, 3), "basis": "observed",
+                        "note": f"{usable:.1f}s usable of 60s target"},
+            "specificity": {"value": exact / len(assets) if assets else 0, "basis": "observed",
+                            "note": f"{exact} of {len(assets)} assets exactly species-tagged"},
+            "rights": {"value": len(assets) / len(matching) if matching else 0,
+                       "basis": "observed",
+                       "note": f"{len(assets)} of {len(matching)} matching assets rights-clear"},
+            "own_performance": {"value": round(min(views_per_day or 0, outlier_cap), 2),
+                                "basis": "observed",
+                                "note": "median views/day, latest snapshot per platform"},
+            "comparable_demand": {"value": round(comparable or 0, 2), "basis": "predicted",
+                                  "note": "median views/day of keyword-matched public metadata"},
+            "novelty": {"value": 0 if topic["pillar"] in exported_pillars else 1,
+                        "basis": "heuristic",
+                        "note": "controlled exploration: pillar has no exported video"},
+            "behavior": {"value": 1 if any(a["behavior"] for a in assets) else 0,
+                         "basis": "observed",
+                         "note": "documented visual behaviour in cataloged clips"},
+            "cost": {"value": round(min(usable / 60, 1), 2), "basis": "predicted",
+                     "note": "rough render minutes relative to a one-minute short"}}
+        contributions = {
+            "evidence": min(facts, 5) * weights.get("evidence", 2),
+            "footage": signals["footage"]["value"] * weights.get("footage", 10),
+            "specificity": signals["specificity"]["value"] * weights.get("specificity", 2),
+            "rights": signals["rights"]["value"] * weights.get("rights", 5),
+            "own_performance": (min(views_per_day or 0, outlier_cap) /
+                                outlier_cap * weights.get("own_performance", 8)),
+            "comparable_demand": (min(comparable or 0, outlier_cap) /
+                                  outlier_cap * weights.get("comparable_demand", 4)),
+            "novelty": signals["novelty"]["value"] * weights.get("novelty", 3),
+            "behavior": signals["behavior"]["value"] * weights.get("behavior", 2),
+            "cost": signals["cost"]["value"] * weights.get("cost", -2)}
+        score = round(sum(contributions.values()), 3)
+        reasons = {"formula": formula, "approved_facts": facts,
+                   "usable_visuals": len(assets), "usable_footage_s": round(usable, 1),
                    "analytics": ({"median_views_per_day": round(views_per_day, 2),
-                                  "rank_boost": round(boost, 2)}
+                                  "rank_boost": round(contributions["own_performance"], 2)}
                                  if views_per_day is not None else "no observed performance"),
-                   "method": "editorial heuristic, not a virality prediction"}
+                   "signals": signals, "contributions": {k: round(v, 3) for k, v in
+                                                          contributions.items()},
+                   "method": "transparent weighted formula, not a virality guarantee"}
         conn.execute("UPDATE topics SET score=?,reasons=? WHERE id=?",
                      (score, json.dumps(reasons), topic["id"]))
         results.append({"id": topic["id"], "species": topic["species"],

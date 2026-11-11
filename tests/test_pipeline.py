@@ -263,6 +263,48 @@ def test_observed_performance_changes_topic_ranking(conn, setup):
     assert creative.rank_topics(conn)[0]["id"] == topic
 
 
+def test_ranking_is_versioned_explainable_and_capped(conn, setup):
+    topic, fact, asset = setup
+    ranked = creative.rank_topics(conn)
+    top = next(r for r in ranked if r["id"] == topic)
+    assert top["reasons"]["formula"] == "v2"
+    contributions = top["reasons"]["contributions"]
+    assert top["score"] == pytest.approx(sum(contributions.values()), abs=0.01)
+    assert top["reasons"]["signals"]["evidence"]["basis"] == "observed"
+    assert top["reasons"]["signals"]["cost"]["basis"] == "predicted"
+
+
+def test_viral_outlier_cannot_drown_exploration(conn, setup, tmp_path):
+    topic, fact, asset = setup
+    second = evidence.add_topic(conn, "Viral animal", "Species viral", "New pillar")
+    second_fact = evidence.add_fact(conn, second, "It is viral.", "Org", "local:v",
+                                    "It is viral.", "2026-01-01")
+    evidence.approve_fact(conn, second_fact)
+    footage_path = Path(conn.execute("SELECT path FROM assets WHERE id=?",
+                                     (asset,)).fetchone()[0])
+    second_asset = media.import_asset(conn, footage_path, source_ref="local:v",
+                                      creator="T", license_type="original",
+                                      evidence="fixture", attribution="T",
+                                      species="Viral animal", commercial=True,
+                                      modifications=True)
+    media.approve_asset(conn, second_asset)
+    plan_id = creative.save_plan(conn, plan(second, second_fact, second_asset, "It is viral."))
+    conn.execute("INSERT INTO analytics(id,video_id,platform,observed_at,published_at,"
+                 "views,source) VALUES('s',?,'youtube','2026-01-10',"
+                 "'2026-01-01',900000,'operator import')", (plan_id,))
+    ranked = creative.rank_topics(conn)
+    boost = ranked[0]["reasons"]["contributions"]["own_performance"]
+    assert boost <= 8.0  # log-capped; a viral hit cannot exceed the weight
+    assert ranked[0]["reasons"]["signals"]["own_performance"]["value"] <= 500
+
+
+def test_unsaturated_pillar_gets_exploration_signal(conn, setup):
+    topic, fact, asset = setup
+    ranked = creative.rank_topics(conn)
+    novelty = next(r for r in ranked if r["id"] == topic)["reasons"]["signals"]["novelty"]
+    assert novelty["value"] == 1 and novelty["basis"] == "heuristic"
+
+
 def test_analytics_import_age_normalization(conn, tmp_path):
     path = tmp_path / "snapshot.json"
     path.write_text(json.dumps([{"video_id": "v1", "platform": "youtube",
