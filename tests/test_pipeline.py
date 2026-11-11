@@ -249,13 +249,15 @@ def test_observed_performance_changes_topic_ranking(conn, setup):
                                       modifications=True)
     media.approve_asset(conn, second_asset)
     plan_id = creative.save_plan(conn, plan(second, second_fact, second_asset, "It exists."))
-    conn.execute("INSERT INTO analytics VALUES(?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO analytics(id,video_id,platform,observed_at,published_at,"
+                 "views,likes,watch_seconds,completion,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
                  ("s1", plan_id, "youtube", "2026-01-05T00:00:00+00:00",
                   "2026-01-03T00:00:00+00:00", 1000, None, None, None, "operator import"))
     ranking = creative.rank_topics(conn)
     assert ranking[0]["id"] == second
     assert ranking[0]["reasons"]["analytics"]["median_views_per_day"] == 500
-    conn.execute("INSERT INTO analytics VALUES(?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO analytics(id,video_id,platform,observed_at,published_at,"
+                 "views,likes,watch_seconds,completion,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
                  ("s2", plan_id, "youtube", "2026-01-20T00:00:00+00:00",
                   "2026-01-03T00:00:00+00:00", 0, None, None, None, "operator import"))
     assert creative.rank_topics(conn)[0]["id"] == topic

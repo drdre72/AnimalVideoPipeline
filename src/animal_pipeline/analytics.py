@@ -16,11 +16,15 @@ def import_snapshots(conn: sqlite3.Connection, path: Path) -> int:
             raise ValueError("invalid performance source or views")
         datetime.fromisoformat(item["published_at"])
         datetime.fromisoformat(item["observed_at"])
-        cur = conn.execute("INSERT OR IGNORE INTO analytics VALUES(?,?,?,?,?,?,?,?,?,?)",
-                           (new_id("snapshot"), item["video_id"], item["platform"],
-                            item["observed_at"], item["published_at"], item["views"],
-                            item.get("likes"), item.get("watch_seconds"),
-                            item.get("completion"), item["source"]))
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO analytics(id,video_id,platform,observed_at,published_at,"
+            "views,likes,watch_seconds,completion,source,comments,subscribers,shares) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (new_id("snapshot"), item["video_id"], item["platform"],
+             item["observed_at"], item["published_at"], item["views"],
+             item.get("likes"), item.get("watch_seconds"), item.get("completion"),
+             item["source"], item.get("comments"), item.get("subscribers"),
+             item.get("shares")))
         count += cur.rowcount
     return count
 

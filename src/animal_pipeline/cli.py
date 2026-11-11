@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import analytics, commons, competitors, creative, editor, evidence, media, research, review, scheduler, server, service
+from . import analytics, commons, competitors, creative, editor, evidence, google_auth, media, research, review, scheduler, server, service, youtube
 from .core import ROOT, connect, settings
 
 
@@ -102,6 +102,16 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("simulate", help="Run synthetic nonpublishable fixture demonstration")
     svc = sub.add_parser("services", help="Manage the local launchd desk agent")
     svc.add_argument("action", choices=("install", "status", "uninstall"))
+    yt = sub.add_parser("youtube", help="Authorized read-only YouTube integration")
+    yt.add_argument("action", choices=("migrate", "auth", "status", "sync",
+                                       "analytics", "competitors", "link", "upload"))
+    yt.add_argument("--env", help="NewsRoom-style .env to import allowlisted keys from")
+    yt.add_argument("--json", help="Google OAuth client_secret JSON to import")
+    yt.add_argument("--plan", help="plan_id for link/upload")
+    yt.add_argument("--video", help="YouTube video_id for link")
+    yt.add_argument("--ack", action="store_true",
+                    help="operator acknowledgement for upload attempts")
+    yt.add_argument("--dry-run", action="store_true")
     return p
 
 
@@ -230,6 +240,31 @@ def dispatch(args: argparse.Namespace) -> object:
                     raise ValueError("competitors import requires an authorized metadata JSON path")
                 return {"imported": competitors.import_metadata(conn, Path(args.path))}
             return competitors.report(conn)
+        if args.command == "youtube":
+            if not settings().get("youtube", {}).get("enabled"):
+                raise ValueError("youtube integration is disabled in config")
+            if args.action == "migrate":
+                return google_auth.migrate(env=Path(args.env) if args.env else None,
+                                           client_json=Path(args.json) if args.json else None)
+            if args.action == "auth":
+                return google_auth.authorize()
+            if args.action == "status":
+                return google_auth.status()
+            if args.action == "sync":
+                return youtube.sync_uploads(conn)
+            if args.action == "analytics":
+                return youtube.sync_analytics(conn)
+            if args.action == "competitors":
+                return youtube.sync_competitors(conn)
+            if args.action == "link":
+                if not args.plan or not args.video:
+                    raise ValueError("link requires --plan and --video")
+                return youtube.link_video(conn, args.plan, args.video)
+            if args.action == "upload":
+                if not args.plan:
+                    raise ValueError("upload requires --plan")
+                return youtube.upload(conn, args.plan, operator_ack=args.ack,
+                                      dry_run=args.dry_run or not args.ack)
         raise ValueError("unsupported command")
     finally:
         conn.close()

@@ -84,7 +84,13 @@ CREATE TABLE IF NOT EXISTS analytics (
  id TEXT PRIMARY KEY, video_id TEXT NOT NULL, platform TEXT NOT NULL,
  observed_at TEXT NOT NULL, published_at TEXT NOT NULL, views INTEGER NOT NULL,
  likes INTEGER, watch_seconds REAL, completion REAL, source TEXT NOT NULL,
+ comments INTEGER, subscribers INTEGER, shares INTEGER,
  UNIQUE(video_id,platform,observed_at)
+);
+CREATE TABLE IF NOT EXISTS youtube_videos (
+ id TEXT PRIMARY KEY, video_id TEXT NOT NULL UNIQUE, plan_id TEXT,
+ title TEXT NOT NULL, channel_id TEXT NOT NULL, published_at TEXT NOT NULL,
+ duration_s REAL, first_seen_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS competitors (
  id TEXT PRIMARY KEY, channel TEXT NOT NULL, video_id TEXT NOT NULL,
@@ -108,6 +114,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     if "claimed_at" not in {row["name"] for row in
                           conn.execute("PRAGMA table_info(jobs)")}:
         conn.execute("ALTER TABLE jobs ADD COLUMN claimed_at TEXT")
+    analytics_cols = {row["name"] for row in conn.execute("PRAGMA table_info(analytics)")}
+    for column in ("comments", "subscribers", "shares"):
+        if column not in analytics_cols:
+            conn.execute(f"ALTER TABLE analytics ADD COLUMN {column} INTEGER")
     return conn
 
 

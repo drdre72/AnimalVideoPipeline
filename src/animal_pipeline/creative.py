@@ -16,7 +16,11 @@ def _topic_feedback(conn: sqlite3.Connection, topic_id: str) -> float | None:
     rows = conn.execute(
         "SELECT a.video_id, a.platform, a.views, a.published_at, a.observed_at "
         "FROM analytics a JOIN plans p ON p.id = a.video_id "
-        "WHERE p.topic_id=?", (topic_id,)).fetchall()
+        "WHERE p.topic_id=? UNION ALL "
+        "SELECT a.video_id, a.platform, a.views, a.published_at, a.observed_at "
+        "FROM analytics a JOIN youtube_videos y ON y.video_id = a.video_id "
+        "JOIN plans p ON p.id = y.plan_id WHERE p.topic_id=?",
+        (topic_id, topic_id)).fetchall()
     latest: dict[tuple[str, str], sqlite3.Row] = {}
     for row in rows:
         key = (row["video_id"], row["platform"])

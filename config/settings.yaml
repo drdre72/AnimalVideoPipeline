@@ -22,6 +22,14 @@ publishing:
   uploads_enabled: false
   messaging_enabled: false
   destinations: []
+youtube:
+  enabled: true
+  secrets_file: secrets/google.json
+  channel_id: ""
+  channel_handle: "@NaminalHub"
+  upload_enabled: false
+  max_retries: 3
+  retry_backoff_s: 2
 footage:
   max_shot_s: 30
   micro_min_s: 15

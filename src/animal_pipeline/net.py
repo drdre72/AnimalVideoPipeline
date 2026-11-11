@@ -29,3 +29,16 @@ def bounded_open(url: str, hosts: set[str], *, name: str = "URL", timeout: int =
         url, headers={"User-Agent": "NaminalHub/0.1 rights-research"}), timeout=timeout)
     check_url(response.geturl(), hosts, name)
     return response
+
+
+def bounded_request(url: str, hosts: set[str], *, name: str = "URL",
+                    data: bytes | None = None, headers: dict | None = None,
+                    timeout: int = 30, method: str | None = None):
+    check_url(url, hosts, name)
+    opener = urllib.request.build_opener(RestrictedRedirect(hosts, name))
+    request = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"User-Agent": "NaminalHub/0.1 rights-research", **(headers or {})})
+    response = opener.open(request, timeout=timeout)
+    check_url(response.geturl(), hosts, name)
+    return response
