@@ -50,6 +50,13 @@ def approve_fact(conn: sqlite3.Connection, fact_id: str) -> None:
     conn.execute("UPDATE facts SET status='approved' WHERE id=?", (fact_id,))
 
 
+def reject_fact(conn: sqlite3.Connection, fact_id: str) -> None:
+    fact = conn.execute("SELECT status FROM facts WHERE id=?", (fact_id,)).fetchone()
+    if not fact or fact["status"] != "proposed":
+        raise ValueError("fact is not proposed")
+    conn.execute("UPDATE facts SET status='rejected' WHERE id=?", (fact_id,))
+
+
 def validate_segments(conn: sqlite3.Connection, topic_id: str, segments: list[dict]) -> list[str]:
     errors = []
     topic = conn.execute("SELECT * FROM topics WHERE id=?", (topic_id,)).fetchone()

@@ -102,3 +102,64 @@ def test_commons_search_lists_video_titles_without_download(monkeypatch):
         return Response(payload, url)
     monkeypatch.setattr(commons, "_open", open_response)
     assert commons.search("Octopus cyanea") == ["File:Octopus.ogv"]
+
+
+def _wiki_extract(text):
+    return json.dumps({"query": {"pages": [{
+        "title": "Octopus cyanea", "fullurl": "https://en.wikipedia.org/wiki/Octopus_cyanea",
+        "extract": text}]}}).encode()
+
+
+def test_research_proposes_verbatim_candidates_idempotently(tmp_path, monkeypatch):
+    from animal_pipeline import evidence, research
+    extract = ("The day octopus is active during daylight hours. "
+               "It can change colour to match coral and rock surfaces. "
+               "Short.")
+    monkeypatch.setattr(research, "_open",
+                        lambda url, hosts: Response(_wiki_extract(extract), url))
+    conn = connect(tmp_path / "facts.db")
+    topic = evidence.add_topic(conn, "Day octopus", "Octopus cyanea", "Tiny but Extraordinary")
+    ids = research.propose(conn, topic, "Octopus cyanea")
+    assert len(ids) == 2
+    rows = conn.execute("SELECT statement,excerpt,status,source_ref FROM facts").fetchall()
+    assert {r["status"] for r in rows} == {"proposed"}
+    assert rows[0]["statement"] == rows[0]["excerpt"]
+    assert rows[0]["source_ref"] == "https://en.wikipedia.org/wiki/Octopus_cyanea"
+    assert research.propose(conn, topic, "Octopus cyanea") == []
+    with pytest.raises(ValueError, match="invalid or stale"):
+        from animal_pipeline import creative
+        creative.save_plan(conn, {"topic_id": topic, "title": "T", "hooks": ["a", "b", "c"],
+            "segments": [{"text": rows[0]["statement"], "fact_ids": [ids[0]],
+                          "asset_id": "a", "start_s": 0, "duration_s": 2}]})
+    conn.close()
+
+
+def test_research_rejects_unsafe_title_and_oversized_response(tmp_path, monkeypatch):
+    from animal_pipeline import evidence, research
+    conn = connect(tmp_path / "facts.db")
+    topic = evidence.add_topic(conn, "Day octopus", "Octopus cyanea", "Tiny but Extraordinary")
+    with pytest.raises(ValueError, match="title"):
+        research.propose(conn, topic, "Octopus cyanea#Section")
+    monkeypatch.setattr(research, "MAX_BYTES", 10)
+    monkeypatch.setattr(research, "_open",
+                        lambda url, hosts: Response(_wiki_extract("Some extract."), url))
+    with pytest.raises(ValueError, match="limit"):
+        research.propose(conn, topic, "Octopus cyanea")
+    assert conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 0
+    conn.close()
+
+
+def test_reject_fact_completes_triage(tmp_path):
+    from animal_pipeline import evidence
+    conn = connect(tmp_path / "facts.db")
+    topic = evidence.add_topic(conn, "Day octopus", "Octopus cyanea", "Tiny but Extraordinary")
+    fact = evidence.add_fact(conn, topic, "Proposed claim.", "Org", "local:s",
+                             "Proposed claim.", "2026-01-01")
+    evidence.reject_fact(conn, fact)
+    assert conn.execute("SELECT status FROM facts WHERE id=?", (fact,)).fetchone()[0] == "rejected"
+    approved = evidence.add_fact(conn, topic, "Approved claim.", "Org", "local:s2",
+                                 "Approved claim.", "2026-01-01")
+    evidence.approve_fact(conn, approved)
+    with pytest.raises(ValueError, match="not proposed"):
+        evidence.reject_fact(conn, approved)
+    conn.close()

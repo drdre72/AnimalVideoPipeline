@@ -8,9 +8,9 @@ import re
 import sqlite3
 import tempfile
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
+from . import net
 from .core import digest, now
 from .media import import_asset, probe
 
@@ -28,29 +28,11 @@ API_HOST = "commons.wikimedia.org"
 
 
 def _check_url(url: str, hosts: set[str]) -> None:
-    parsed = urllib.parse.urlsplit(url)
-    if (parsed.scheme != "https" or parsed.hostname not in hosts or
-            parsed.port not in (None, 443) or parsed.username or parsed.password or
-            parsed.fragment):
-        raise ValueError("unsafe Commons URL")
-
-
-class _RestrictedRedirect(urllib.request.HTTPRedirectHandler):
-    def __init__(self, hosts: set[str]):
-        self.hosts = hosts
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _check_url(newurl, self.hosts)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+    net.check_url(url, hosts, "Commons URL")
 
 
 def _open(url: str, hosts: set[str]):
-    _check_url(url, hosts)
-    opener = urllib.request.build_opener(_RestrictedRedirect(hosts))
-    response = opener.open(urllib.request.Request(
-        url, headers={"User-Agent": "NaminalHub/0.1 rights-research"}), timeout=30)
-    _check_url(response.geturl(), hosts)
-    return response
+    return net.bounded_open(url, hosts, name="Commons URL")
 
 
 def _api(params: dict) -> dict:

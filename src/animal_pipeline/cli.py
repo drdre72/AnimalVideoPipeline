@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import analytics, commons, competitors, creative, editor, evidence, media, review, scheduler, server
+from . import analytics, commons, competitors, creative, editor, evidence, media, research, review, scheduler, server
 from .core import ROOT, connect, settings
 
 
@@ -47,6 +47,17 @@ def parser() -> argparse.ArgumentParser:
     commons_import.add_argument("title")
     commons_import.add_argument("--species", required=True)
     commons_import.add_argument("--allow-network", action="store_true")
+    research_search = sub.add_parser("research-search",
+                                     help="Search Wikipedia article titles via the official API")
+    research_search.add_argument("query")
+    research_search.add_argument("--allow-network", action="store_true")
+    research_propose = sub.add_parser("research-propose",
+                                      help="Propose verbatim Wikipedia sentence facts for a topic")
+    research_propose.add_argument("topic_id")
+    research_propose.add_argument("title")
+    research_propose.add_argument("--allow-network", action="store_true")
+    reject = sub.add_parser("reject-fact", help="Reject a proposed fact during triage")
+    reject.add_argument("fact_id")
     inspect = sub.add_parser("inspect-asset", help="Generate clip contact sheet and vertical preview")
     inspect.add_argument("asset_id")
     rights = sub.add_parser("verify-rights", help="Operator confirms rights evidence")
@@ -144,6 +155,16 @@ def dispatch(args: argparse.Namespace) -> object:
             return {"asset_id": commons.import_video(conn, args.title, args.species,
                                                        ROOT / "cache" / "commons"),
                     "approved": False, "requires_operator_rights_review": True}
+        if args.command in ("research-search", "research-propose"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for Wikipedia access")
+            if args.command == "research-search":
+                return research.search(args.query)
+            return {"proposed": research.propose(conn, args.topic_id, args.title),
+                    "status": "proposed", "requires_operator_verification": True}
+        if args.command == "reject-fact":
+            evidence.reject_fact(conn, args.fact_id)
+            return "fact rejected"
         if args.command == "inspect-asset":
             return media.inspect_asset(conn, args.asset_id, ROOT / "cache" / "media")
         if args.command == "verify-rights":

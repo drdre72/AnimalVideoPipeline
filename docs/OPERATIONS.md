@@ -43,13 +43,21 @@ Enqueueing is idempotent on `(kind, target_id)`, so repeat runs do not
 duplicate work. Rendering stays serial: one VideoToolbox encode and one
 SQLite writer at a time on this hardware.
 
-Current limits: operator-assisted topic entry and evidence approval, no
-remote fact research (Commons media discovery is the only network path and
-requires explicit `--allow-network`), no resident TTS worker, no launchd
-installation, no automatic publication, and no source-specific platform API
-analytics. Performance imports are local JSON. Voice and Metal inference
-performance have not been validated in this project. Disk availability and
-current hardware status appear in `doctor`.
+`research-search` and `research-propose <topic_id> <title>` use the official
+Wikipedia API over the same bounded-HTTPS boundary as Commons (`--allow-network`
+required). `research-propose` fetches only the article's plain-text intro,
+files each verbatim sentence as a `proposed` fact with the canonical article
+URL, and is idempotent per topic. These are triage candidates: narration still
+requires `verify-fact` per fact, and `reject-fact` disposes of the rest. The
+operator verifies the excerpt and its underlying citation — Wikipedia is a
+finding aid, not an authority.
+
+Current limits: operator-assisted topic entry and per-fact verification
+(remote research covers Wikipedia intro extracts only), no resident TTS
+worker, no launchd installation, no automatic publication, and no
+source-specific platform API analytics. Performance imports are local JSON.
+Voice and Metal inference performance have not been validated in this
+project. Disk availability and current hardware status appear in `doctor`.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
 queue, per-revision video, blocking checks, script and manifest. It opens
