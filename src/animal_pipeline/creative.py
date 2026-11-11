@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -120,3 +121,28 @@ def revise_plan(conn: sqlite3.Connection, plan_id: str, updated: dict) -> str:
     if not original or updated.get("topic_id") != original["topic_id"]:
         raise ValueError("revision must remain with original topic")
     return save_plan(conn, updated)
+
+
+OPEN_REVISIONS = ("SCRIPT_READY", "READY_FOR_REVIEW", "APPROVED", "EXPORTED")
+
+
+def draft_ready(conn: sqlite3.Connection, limit: int) -> dict:
+    drafted, errors = [], {}
+    for topic in rank_topics(conn):
+        if len(drafted) >= limit:
+            break
+        reasons = topic["reasons"]
+        if not reasons["approved_facts"] or not reasons["usable_visuals"]:
+            continue
+        if conn.execute("SELECT 1 FROM plans WHERE topic_id=? AND status IN "
+                        f"({','.join('?' * len(OPEN_REVISIONS))}) LIMIT 1",
+                        (topic["id"], *OPEN_REVISIONS)).fetchone():
+            continue
+        try:
+            drafted.append(save_plan(conn, generate_plan(conn, topic["id"])))
+        except (OSError, urllib.error.URLError) as exc:
+            errors["llm"] = f"planner unavailable: {exc}"
+            break
+        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            errors[topic["id"]] = str(exc)[:200]
+    return {"drafted": drafted, "errors": errors}

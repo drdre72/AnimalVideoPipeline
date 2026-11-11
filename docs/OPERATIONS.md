@@ -32,13 +32,18 @@ For footage shorter than the default 61-second target, `draft <plan.json>
 an explicit editorial exception for a 20–70-second Short. This does not
 bypass fact, rights, captions, audio, QC or exact-revision review.
 
-`run` is one bounded batch: it enqueues `SCRIPT_READY` plans up to
-`production.daily_review_target`, recovers stale `running` jobs (claimed
-longer than `workers.stale_after_s`, or claimed before `claimed_at` existed)
-and requeues `failed` jobs that still have attempts under
-`workers.max_attempts`, then drains queued jobs serially up to
-`workers.queue_size` (`--limit` narrows it). A running job claimed recently is
-never stolen by a second `run`; a stale job out of attempts fails permanently.
+`run` is one bounded batch. It first drafts plans for ranked topics that
+have approved facts and footage but no open revision
+(`SCRIPT_READY`/`READY_FOR_REVIEW`/`APPROVED`/`EXPORTED`), up to
+`production.daily_review_target`; a draft that fails validation is recorded
+in `plan_errors` and never stored, and an unreachable planner stops the
+drafting phase only. It then enqueues `SCRIPT_READY` plans, recovers stale
+`running` jobs (claimed longer than `workers.stale_after_s`, or claimed
+before `claimed_at` existed) and requeues `failed` jobs that still have
+attempts under `workers.max_attempts`, then drains queued jobs serially up
+to `workers.queue_size` (`--limit` narrows it, `--no-draft` skips drafting).
+A running job claimed recently is never stolen by a second `run`; a stale
+job out of attempts fails permanently.
 Enqueueing is idempotent on `(kind, target_id)`, so repeat runs do not
 duplicate work. Rendering stays serial: one VideoToolbox encode and one
 SQLite writer at a time on this hardware.

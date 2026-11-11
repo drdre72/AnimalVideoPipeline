@@ -176,9 +176,46 @@ def test_drain_records_claim_and_bounds_the_batch(conn, setup):
                         (second,)).fetchone()[0] == "queued"
 
 
-def test_queue_rejects_unknown_render_target(conn):
+def test_queue_rejects_unknown_render_target(conn, setup):
     with pytest.raises(ValueError, match="unknown render target"):
         scheduler.enqueue(conn, "render", "plan_missing")
+
+
+def test_draft_ready_is_bounded_idempotent_and_fail_closed(conn, setup, monkeypatch):
+    topic, fact, asset = setup
+    monkeypatch.setattr(creative, "generate_plan",
+                        lambda c, t: plan(t, fact, asset))
+    result = creative.draft_ready(conn, limit=2)
+    assert result["drafted"] and not result["errors"]
+    assert conn.execute("SELECT status FROM plans").fetchone()[0] == "SCRIPT_READY"
+    assert creative.draft_ready(conn, limit=2)["drafted"] == []
+    second = evidence.add_topic(conn, "Second animal", "Species two", "Tiny but Extraordinary")
+    second_fact = evidence.add_fact(conn, second, "It exists.", "Org", "local:s",
+                                    "It exists.", "2026-01-01")
+    evidence.approve_fact(conn, second_fact)
+    footage_path = Path(conn.execute("SELECT path FROM assets WHERE id=?",
+                                     (asset,)).fetchone()[0])
+    second_asset = media.import_asset(conn, footage_path, source_ref="local:fixture2",
+                                      creator="Test operator", license_type="original",
+                                      evidence="fixture", attribution="Test operator",
+                                      species="Second animal", commercial=True,
+                                      modifications=True)
+    media.approve_asset(conn, second_asset)
+    monkeypatch.setattr(creative, "generate_plan",
+                        lambda c, t: plan(t, "invented", asset))
+    rejected = creative.draft_ready(conn, limit=2)
+    assert not rejected["drafted"] and second in rejected["errors"]
+    assert conn.execute("SELECT COUNT(*) FROM plans WHERE topic_id=?",
+                        (second,)).fetchone()[0] == 0
+
+
+def test_draft_ready_stops_when_planner_unavailable(conn, setup, monkeypatch):
+    topic, fact, asset = setup
+    def unavailable(c, t):
+        raise OSError("connection refused")
+    monkeypatch.setattr(creative, "generate_plan", unavailable)
+    result = creative.draft_ready(conn, limit=2)
+    assert not result["drafted"] and "llm" in result["errors"]
 
 
 def test_rank_prefers_approved_visuals(conn, setup):
