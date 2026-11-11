@@ -1,0 +1,37 @@
+project:
+  name: Naminal Hub
+storage:
+  database: naminal.db
+  min_free_gb: 10
+  min_available_gb: 2
+workers:
+  queue_size: 16
+  llm: 1
+  tts: 1
+  alignment: 1
+  video: 1
+production:
+  daily_review_target: 2
+publishing:
+  automatic: false
+  uploads_enabled: false
+  messaging_enabled: false
+  destinations: []
+render:
+  width: 1080
+  height: 1920
+  fps: 30
+  encoder: h264_videotoolbox
+  min_duration_s: 61
+  max_duration_s: 70
+voice:
+  backend: kokoro_mlx
+  model: mlx-community/Kokoro-82M-v1.0-4bit
+  approved: false
+  name: ""
+  strict: true
+alignment:
+  model_path: models/ggml-base.en.bin
+llm:
+  model: qwen3:8b
+  base_url: http://127.0.0.1:11434

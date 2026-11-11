@@ -2,7 +2,9 @@
 
 - Root package `src/animal_pipeline`; `config/` contains safe local defaults;
   `docs/` covers architecture, rights, security, tests and operations.
-- `uv sync --extra dev`; `uv run pytest`; `uv run python main.py doctor`.
+- `uv sync --no-editable --extra dev`;
+  `uv run --no-editable --extra dev pytest`;
+  `uv run --no-editable python main.py doctor`.
 - SQLite is authoritative: keep facts and revisions append-only, use atomic
   transactions, never silently discard sources, media or failed jobs.
 - Factual narration must cite approved, current Fact IDs. Citation existence

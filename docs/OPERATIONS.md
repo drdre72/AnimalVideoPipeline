@@ -1,7 +1,8 @@
 # Operations
 
-Run `uv sync --extra dev`, then `uv run python main.py doctor`. FFmpeg and
-FFprobe are required. For production voice, install `uv sync --extra tts`,
+Run `uv sync --no-editable --extra dev`, then
+`uv run --no-editable python main.py doctor`. FFmpeg and FFprobe are required.
+For production voice, install `uv sync --no-editable --extra tts`,
 choose and approve a voice in `config/settings.yaml`, run Ollama locally
 with an installed Qwen-class model and configure a local whisper.cpp model.
 The strict render path fails rather than substitute another voice or estimated
@@ -15,6 +16,10 @@ its QC as failed, and cannot export it. It does not satisfy the real animal
 video acceptance criterion. Complete this with rights-cleared wildlife
 footage, independently verified species-specific facts and an approved voice
 and whisper model. `plan` needs a running local Ollama server.
+To approve a production render, inspect its manifest, facts, species/crop,
+rights and sound, then pass all four `--verify-*` attestations with the exact
+SHA-256 shown by `review`. This is an operator assertion, not a substitute for
+independent evidence.
 
 Current limits: operator-assisted topic entry and evidence approval, no remote
 research/discovery or footage download, no resident TTS worker, no local

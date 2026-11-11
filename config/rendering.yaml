@@ -1,0 +1,13 @@
+profiles:
+  youtube:
+    width: 1080
+    height: 1920
+    fps: 30
+  tiktok:
+    width: 1080
+    height: 1920
+    fps: 30
+  instagram:
+    width: 1080
+    height: 1920
+    fps: 30
