@@ -83,6 +83,18 @@ finding aid, not an authority.
 `service.interval_s` seconds under the project `.venv`. It is operator
 install only, `RunAtLoad` is off, output goes to `output/logs/`, and the
 agent still cannot publish — it only produces review-ready drafts.
+`services pause` writes a `service.paused` flag so `run` exits before
+drafting or draining without losing queue state; `services resume` clears
+it. `services health` reports installed/paused/plist status plus Ollama
+reachability without mutating anything. `run` also reports
+`waiting_for_model` when Ollama is unreachable — affected topics stay
+draftable next cycle rather than recording a plan error.
+
+`doctor` separates REQUIRED components (Python env, FFmpeg/FFprobe,
+whisper.cpp binary + model, Kokoro voice, Ollama server + model) from
+OPTIONAL ones (YouTube client config, YouTube authorization, launchd
+agent, competitor imports). A missing optional component never fails the
+check; a missing required one does.
 
 Narration runs through a resident Kokoro worker
 (`python -m animal_pipeline.kokoro_worker`): the model loads once per
@@ -90,12 +102,33 @@ process instead of per render, a dead worker respawns once, and the
 per-call CLI remains the cold fallback. First synthesis includes the
 model load; subsequent ones are an order of magnitude faster.
 
-Current limits: operator-assisted topic entry and per-fact verification
-(remote research covers Wikipedia intro extracts only), no automatic
-publication, and no source-specific platform API analytics. Performance
-imports are local JSON. Voice and Metal inference performance have not
-been validated in this project. Disk availability and current hardware
-status appear in `doctor`.
+`youtube` subcommands provide the read-only connector:
+
+```bash
+python main.py youtube migrate <oauth-client.json>
+    # imports ONLY {client_id, client_secret, project_id} plus migration
+    # metadata into secrets/google.json (mode 600, gitignored). Refuses
+    # to copy tokens, channel IDs or any non-allowlisted key.
+python main.py youtube status
+    # {client_configured, authorized, channel_id, channel_title,
+    #  expected_channel, identity_matches, upload_enabled}
+python main.py youtube authorize --channel "Naminal Hub"
+    # PKCE loopback OAuth for the dedicated NAMINAL channel; read-only
+    # scopes only. Fetches + persists the channel ID and title, then
+    # refuses to proceed if the authorized channel mismatches the
+    # expected name (set youtube.expected_channel in settings first).
+python main.py youtube ingest       # Data + Analytics APIs -> SQLite snapshots
+python main.py youtube competitors  # authorized public-channel metadata
+```
+
+Upload transport exists only as a dormant adapter: it refuses unless
+`publishing.uploads_enabled` is true AND the authorized channel identity
+matches `youtube.expected_channel` — and nothing in this phase enables it.
+Analytics snapshots are deduplicated by (video_id, metric set, observed_at
+bucket); the same ingest run twice stores one row. Metrics the API cannot
+return (retention where unsupported, subscriber conversions) are stored as
+`null` with the field present, never fabricated. Ranking treats analytics
+as observed demand (log-scaled to cap viral outliers), not predictions.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
 queue, per-revision video, blocking checks, script and manifest, plus a
@@ -104,3 +137,18 @@ queue, per-revision video, blocking checks, script and manifest, plus a
 show the prefilled `approve` command (exact SHA-256, all four attestations)
 and approved ones the three `export` commands; nothing mutates over HTTP —
 a fresh SQLite connection per request serves GETs only.
+
+`/dashboard` adds the operator overview: ranked research candidates with
+footage budgets and signal contributions, media/rights readiness, drafts
+awaiting attention, the active processing stage, render failures with retry
+reasons, export-ready revisions, tracked-video analytics, observed channel
+growth and disk headroom. `/report` renders the weekly optimization report
+(`report.py`): what performed well, what failed, and recommended
+experiments — correlations are explicitly labelled non-causal.
+
+Current limits: operator-assisted topic entry and per-fact verification
+(remote research covers Wikipedia intro extracts only), no automatic
+publication (upload adapter is dormant and identity-gated), YouTube
+analytics require operator OAuth. Voice and Metal inference performance
+have not been validated in this project. Disk availability and current
+hardware status appear in `doctor` and `/dashboard`.

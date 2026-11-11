@@ -135,9 +135,13 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
                          "hooks (three distinct strings), title, segments (list of objects "
                          "text, fact_ids, asset_id, start_s, duration_s), description. "
                          "Each segment must reference a supporting fact and a matching clip; "
-                         "no invented claims. The sum of segment duration_s must not exceed "
-                         "footage_budget.limits.max_total_s, each shot must fit inside its "
-                         "asset's in_s..out_s window and stay under limits.max_shot_s, and the "
+                         "no invented claims. start_s is the in-point in seconds INTO the "
+                         "source clip (0 means clip start), not a position in the final "
+                         "timeline; segments are played in list order. The sum of segment "
+                         "duration_s must not exceed footage_budget.limits.max_total_s, each "
+                         "shot must fit inside its asset's in_s..out_s window (start_s + "
+                         "duration_s <= that asset's duration) and stay under "
+                         "limits.max_shot_s, shots on the same asset must not overlap, and the "
                          "whole script must read within narration.estimated_max_words words.",
                          "topic": dict(topic), "facts": facts,
                          "footage_budget": footage})
