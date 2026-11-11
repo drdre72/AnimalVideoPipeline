@@ -452,6 +452,18 @@ def test_review_ui_escapes_and_shows_gates(conn, setup):
     assert "Unknown plan" in server.review_page(conn, "nope")
 
 
+def test_launchd_plist_is_deterministic_and_bounded(tmp_path):
+    from animal_pipeline import service
+    content = service.plist(Path("/opt/naminal"), interval_s=3600, limit=2)
+    assert "ai.naminal.desk" in content and "<integer>3600</integer>" in content
+    assert "<string>/opt/naminal</string>" in content
+    assert "--limit" in content and "<string>2</string>" in content
+    written = service.install(tmp_path, tmp_path / "agents", install_launchctl=False)
+    assert (tmp_path / "agents" / "ai.naminal.desk.plist").is_file()
+    assert (tmp_path / "output" / "logs").is_dir()
+    assert written["bootstrapped"] is False
+
+
 def test_review_ui_serves_over_http(conn, setup, tmp_path):
     import threading
     import urllib.request

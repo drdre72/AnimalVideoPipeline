@@ -14,6 +14,9 @@ workers:
   video: 1
 production:
   daily_review_target: 2
+service:
+  interval_s: 3600
+  run_limit: 2
 publishing:
   automatic: false
   uploads_enabled: false

@@ -58,12 +58,18 @@ requires `verify-fact` per fact, and `reject-fact` disposes of the rest. The
 operator verifies the excerpt and its underlying citation — Wikipedia is a
 finding aid, not an authority.
 
+`services install|status|uninstall` manages a single LaunchAgent,
+`ai.naminal.desk`, that runs `main.py run --limit <service.run_limit>` every
+`service.interval_s` seconds under the project `.venv`. It is operator
+install only, `RunAtLoad` is off, output goes to `output/logs/`, and the
+agent still cannot publish — it only produces review-ready drafts.
+
 Current limits: operator-assisted topic entry and per-fact verification
 (remote research covers Wikipedia intro extracts only), no resident TTS
-worker, no launchd installation, no automatic publication, and no
-source-specific platform API analytics. Performance imports are local JSON.
-Voice and Metal inference performance have not been validated in this
-project. Disk availability and current hardware status appear in `doctor`.
+worker, no automatic publication, and no source-specific platform API
+analytics. Performance imports are local JSON. Voice and Metal inference
+performance have not been validated in this project. Disk availability and
+current hardware status appear in `doctor`.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
 queue, per-revision video, blocking checks, script and manifest. It opens

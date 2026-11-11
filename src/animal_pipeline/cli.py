@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import analytics, commons, competitors, creative, editor, evidence, media, research, review, scheduler, server
+from . import analytics, commons, competitors, creative, editor, evidence, media, research, review, scheduler, server, service
 from .core import ROOT, connect, settings
 
 
@@ -98,6 +98,8 @@ def parser() -> argparse.ArgumentParser:
     bench.add_argument("action", choices=("import", "report"))
     bench.add_argument("path", nargs="?")
     sub.add_parser("simulate", help="Run synthetic nonpublishable fixture demonstration")
+    svc = sub.add_parser("services", help="Manage the local launchd desk agent")
+    svc.add_argument("action", choices=("install", "status", "uninstall"))
     return p
 
 
@@ -203,6 +205,12 @@ def dispatch(args: argparse.Namespace) -> object:
                     "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
         if args.command == "serve":
             return server.serve(port=args.port)
+        if args.command == "services":
+            if args.action == "install":
+                return service.install(ROOT, service.AGENTS)
+            if args.action == "status":
+                return service.status()
+            return service.uninstall()
         if args.command == "analytics":
             if args.action == "import":
                 if not args.path:
