@@ -319,10 +319,81 @@ def test_voice_failure_is_strict(monkeypatch, tmp_path):
         audio.synthesize("hello", tmp_path / "narration.wav")
 
 
+class _DeadWorker:
+    def synthesize(self, *args):
+        raise RuntimeError("worker unavailable")
+
+
+def _stub_worker_command(*, dies_after_ready: bool = False):
+    import textwrap
+    script = textwrap.dedent("""
+        import json, sys, wave
+        sys.stdout.write(json.dumps({"ready": True}) + "\\n")
+        sys.stdout.flush()
+    """)
+    if dies_after_ready:
+        script += "sys.exit(1)\n"
+    else:
+        script += textwrap.dedent("""
+            for line in sys.stdin:
+                req = json.loads(line)
+                out = req["file_prefix"] + "_000.wav"
+                with wave.open(out, "wb") as w:
+                    w.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                    w.writeframes(b"\\0\\0" * 2400)
+                sys.stdout.write(json.dumps({"ok": True, "files": [out]}) + "\\n")
+                sys.stdout.flush()
+        """)
+    return [sys.executable, "-c", script]
+
+
+def test_resident_worker_reuses_one_process(monkeypatch, tmp_path):
+    from animal_pipeline import audio
+    worker = audio._KokoroWorker("model", command=_stub_worker_command())
+    try:
+        first = worker.synthesize("hello", "af_bella", tmp_path / "a")
+        second = worker.synthesize("world", "af_bella", tmp_path / "b")
+        assert first and second and worker._proc.poll() is None
+    finally:
+        worker._kill()
+
+
+def test_dead_worker_respawns_once_then_raises(monkeypatch, tmp_path):
+    from animal_pipeline import audio
+    worker = audio._KokoroWorker("model",
+                                 command=_stub_worker_command(dies_after_ready=True))
+    try:
+        with pytest.raises(RuntimeError):
+            worker.synthesize("hello", "af_bella", tmp_path / "a")
+    finally:
+        worker._kill()
+
+
+def test_worker_failure_falls_back_to_cold_cli(monkeypatch, tmp_path):
+    from animal_pipeline import audio
+    monkeypatch.setattr(audio, "settings", lambda: {"voice": {
+        "backend": "kokoro_mlx", "approved": True, "name": "af_bella", "model": "local"}})
+    monkeypatch.setattr(audio, "_worker_for", lambda model: _DeadWorker())
+    original_run = subprocess.run
+    def run(cmd, **kwargs):
+        if cmd[:3] == [sys.executable, "-m", "mlx_audio.tts.generate"]:
+            prefix = Path(cmd[cmd.index("--file_prefix") + 1])
+            with wave.open(str(prefix.parent / f"{prefix.name}_000.wav"), "wb") as out:
+                out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                out.writeframes(b"\0\0" * 24000)
+            return subprocess.CompletedProcess(cmd, 0)
+        return original_run(cmd, **kwargs)
+    monkeypatch.setattr(audio.subprocess, "run", run)
+    result = audio.synthesize("narration", tmp_path / "n.wav")
+    with wave.open(str(result)) as produced:
+        assert produced.getnframes() == 24000
+
+
 def test_kokoro_multi_part_narration_is_joined(monkeypatch, tmp_path):
     from animal_pipeline import audio
     monkeypatch.setattr(audio, "settings", lambda: {"voice": {
         "backend": "kokoro_mlx", "approved": True, "name": "af_bella", "model": "local"}})
+    monkeypatch.setattr(audio, "_worker_for", lambda model: _DeadWorker())
     original_run = subprocess.run
     def run(cmd, **kwargs):
         if cmd[:3] == [sys.executable, "-m", "mlx_audio.tts.generate"]:

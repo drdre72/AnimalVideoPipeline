@@ -69,12 +69,18 @@ finding aid, not an authority.
 install only, `RunAtLoad` is off, output goes to `output/logs/`, and the
 agent still cannot publish — it only produces review-ready drafts.
 
+Narration runs through a resident Kokoro worker
+(`python -m animal_pipeline.kokoro_worker`): the model loads once per
+process instead of per render, a dead worker respawns once, and the
+per-call CLI remains the cold fallback. First synthesis includes the
+model load; subsequent ones are an order of magnitude faster.
+
 Current limits: operator-assisted topic entry and per-fact verification
-(remote research covers Wikipedia intro extracts only), no resident TTS
-worker, no automatic publication, and no source-specific platform API
-analytics. Performance imports are local JSON. Voice and Metal inference
-performance have not been validated in this project. Disk availability and
-current hardware status appear in `doctor`.
+(remote research covers Wikipedia intro extracts only), no automatic
+publication, and no source-specific platform API analytics. Performance
+imports are local JSON. Voice and Metal inference performance have not
+been validated in this project. Disk availability and current hardware
+status appear in `doctor`.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
 queue, per-revision video, blocking checks, script and manifest. It opens

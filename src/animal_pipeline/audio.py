@@ -1,14 +1,121 @@
 from __future__ import annotations
 
+import atexit
+import glob
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from .core import new_id, settings
+
+_READ_TIMEOUT_S = 300
+
+
+class _KokoroWorker:
+    """One resident mlx_audio process per model — the model loads once at
+    spawn and serves every render after. A dead worker respawns once;
+    synthesize() falls back to the per-call CLI beyond that."""
+
+    def __init__(self, model: str, command: list[str] | None = None):
+        self.model = model
+        self._command = command
+        self._proc: subprocess.Popen | None = None
+
+    def _spawn(self) -> None:
+        src = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(src) + (
+            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        self._proc = subprocess.Popen(
+            self._command or [sys.executable, "-m", "animal_pipeline.kokoro_worker",
+                              "--model", self.model],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env, text=True)
+        ready = self._read(timeout=180)
+        if not ready or not ready.get("ready"):
+            self._kill()
+            raise RuntimeError(
+                f"kokoro worker failed to start: {(ready or {}).get('error') or 'no handshake'}")
+
+    def _read(self, timeout: float) -> dict | None:
+        if not self._proc or not self._proc.stdout:
+            return None
+        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+        if not ready:
+            return None
+        line = self._proc.stdout.readline()
+        if not line:
+            return None
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+    def synthesize(self, text: str, voice: str, prefix: Path) -> list[Path]:
+        for attempt in (0, 1):
+            try:
+                if self._proc is None or self._proc.poll() is not None:
+                    self._spawn()
+                assert self._proc and self._proc.stdin
+                self._proc.stdin.write(json.dumps(
+                    {"text": text, "voice": voice,
+                     "file_prefix": str(prefix)}) + "\n")
+                self._proc.stdin.flush()
+                resp = self._read(timeout=_READ_TIMEOUT_S)
+                if resp is None:
+                    # A timed-out request stays in flight; its late response
+                    # would desync the protocol. Kill the worker so the next
+                    # attempt or the CLI fallback respawns clean.
+                    self._kill()
+                    raise RuntimeError("kokoro worker unresponsive")
+                if resp.get("ok"):
+                    return [Path(f) for f in resp["files"]]
+                raise RuntimeError(
+                    f"kokoro worker error: {resp.get('error') or 'unknown'}")
+            except (BrokenPipeError, OSError, AssertionError) as exc:
+                self._kill()
+                if attempt:
+                    raise RuntimeError(f"kokoro worker failed: {exc}")
+        return []
+
+    def _kill(self) -> None:
+        if self._proc:
+            self._proc.kill()
+            self._proc = None
+
+
+_WORKERS: dict[str, _KokoroWorker] = {}
+
+
+def _worker_for(model: str) -> _KokoroWorker:
+    worker = _WORKERS.get(model)
+    if worker is None:
+        worker = _WORKERS[model] = _KokoroWorker(model)
+    return worker
+
+
+def _close_workers() -> None:
+    for worker in _WORKERS.values():
+        worker._kill()
+
+
+atexit.register(_close_workers)
+
+
+def _synthesize_subprocess(text: str, prefix: Path, voice: str, model: str) -> list[Path]:
+    proc = subprocess.run([sys.executable, "-m", "mlx_audio.tts.generate",
+                           "--model", model, "--voice", voice,
+                           "--text", text, "--file_prefix", str(prefix),
+                           "--audio_format", "wav"], capture_output=True, text=True, timeout=600)
+    parts = sorted(Path(p) for p in glob.glob(f"{prefix}_*.wav"))
+    if proc.returncode or not parts:
+        raise RuntimeError("Kokoro narration failed or produced no audio")
+    return parts
 
 
 def synthesize(text: str, dest: Path) -> Path:
@@ -19,13 +126,12 @@ def synthesize(text: str, dest: Path) -> Path:
         raise RuntimeError("ffmpeg required")
     dest.parent.mkdir(parents=True, exist_ok=True)
     prefix = dest.with_name(new_id("narration"))
-    proc = subprocess.run([sys.executable, "-m", "mlx_audio.tts.generate",
-                           "--model", voice["model"], "--voice", voice["name"],
-                           "--text", text, "--file_prefix", str(prefix),
-                           "--audio_format", "wav"], capture_output=True, text=True, timeout=600)
-    parts = sorted(dest.parent.glob(prefix.name + "_*.wav"))
-    if proc.returncode or not parts:
-        raise RuntimeError("Kokoro narration failed or produced no audio")
+    try:
+        parts = _worker_for(voice["model"]).synthesize(text, voice["name"], prefix)
+    except RuntimeError:
+        parts = []
+    if not parts:
+        parts = _synthesize_subprocess(text, prefix, voice["name"], voice["model"])
     if len(parts) == 1:
         parts[0].replace(dest)
     else:
