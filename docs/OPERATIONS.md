@@ -38,3 +38,8 @@ preview UI or launchd installation, no automatic publication, and no
 source-specific platform API analytics. Performance imports are local JSON.
 Voice and Metal inference performance have not been validated in this project.
 Disk availability and current hardware status appear in `doctor`.
+
+`serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
+queue, per-revision video, blocking checks, script and manifest. It opens
+a fresh SQLite connection per request and cannot approve anything —
+approval stays on the CLI with an exact SHA-256 and all four attestations.

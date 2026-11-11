@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import analytics, commons, competitors, creative, editor, evidence, media, review, scheduler
+from . import analytics, commons, competitors, creative, editor, evidence, media, review, scheduler, server
 from .core import ROOT, connect, settings
 
 
@@ -76,6 +76,8 @@ def parser() -> argparse.ArgumentParser:
     retry = sub.add_parser("retry", help="Retry a failed job up to three attempts")
     retry.add_argument("job_id")
     sub.add_parser("run", help="Recover and process one bounded queue batch")
+    srv = sub.add_parser("serve", help="Read-only local review UI on 127.0.0.1")
+    srv.add_argument("--port", type=int, default=8787)
     perf = sub.add_parser("analytics", help="Import or report authorized local analytics JSON")
     perf.add_argument("action", choices=("import", "report"))
     perf.add_argument("path", nargs="?")
@@ -169,6 +171,8 @@ def dispatch(args: argparse.Namespace) -> object:
         if args.command == "run":
             recovered = scheduler.recover(conn)
             return {"recovered": recovered, "jobs": asyncio.run(scheduler.drain(conn, editor.compose))}
+        if args.command == "serve":
+            return server.serve(port=args.port)
         if args.command == "analytics":
             if args.action == "import":
                 if not args.path:

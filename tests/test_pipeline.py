@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from animal_pipeline import analytics, competitors, creative, editor, evidence, media, review, scheduler
+from animal_pipeline import analytics, competitors, creative, editor, evidence, media, review, scheduler, server
 from animal_pipeline.core import connect
 
 
@@ -366,3 +366,34 @@ def test_real_mp4_probe_and_synthetic_review_block(footage, tmp_path, monkeypatc
     with pytest.raises(ValueError, match="exact rendered|QC"):
         review.approve(db, identifier, result["manifest"]["video_hash"])
     db.close()
+
+
+def test_review_ui_escapes_and_shows_gates(conn, setup):
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset, "It has <b>2</b> ears."))
+    html = server.queue_page(conn)
+    assert identifier in html and "SCRIPT_READY" in html
+    page = server.review_page(conn, identifier)
+    assert "&lt;b&gt;2&lt;/b&gt;" in page and "<b>2</b>" not in page
+    assert "exact rendered video SHA-256" not in page
+    assert "mandatory QC did not pass" in page
+    assert "Unknown plan" in server.review_page(conn, "nope")
+
+
+def test_review_ui_serves_over_http(conn, setup, tmp_path):
+    import threading
+    import urllib.request
+    topic, fact, asset = setup
+    creative.save_plan(conn, plan(topic, fact, asset))
+    conn.close()
+    db = tmp_path / "ui.db"
+    db_conn = connect(db)
+    db_conn.close()
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(db))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+        assert "Review queue" in urllib.request.urlopen(url, timeout=5).read().decode()
+    finally:
+        httpd.shutdown()
