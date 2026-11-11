@@ -27,6 +27,11 @@ H.264/AAC `playable_preview` MP4 in `cache/media/` for review, alongside its
 contact sheet and vertical still. The rights-bound original remains intact;
 the preview does not approve the asset or authorize distribution.
 
+For footage shorter than the default 61-second target, `draft <plan.json>
+--footage-first --reason "Use distinct footage rather than padding"` records
+an explicit editorial exception for a 20–70-second Short. This does not
+bypass fact, rights, captions, audio, QC or exact-revision review.
+
 Current limits: operator-assisted topic entry and evidence approval, no remote
 research/discovery or footage download, no resident TTS worker, no local
 preview UI or launchd installation, no automatic publication, and no

@@ -28,6 +28,10 @@ def _encoder() -> str:
     return encoder
 
 
+def audio_timing_ok(video_duration: float, audio_duration: float) -> bool:
+    return video_duration > 0 and 0.92 * video_duration <= audio_duration <= video_duration + 0.2
+
+
 def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = None, *,
             simulation: bool = False) -> dict:
     row = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
@@ -57,7 +61,8 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         clips.append(asset)
     cfg = settings()["render"]
     duration = sum(float(s["duration_s"]) for s in plan["segments"])
-    if not simulation and not cfg["min_duration_s"] <= duration <= cfg["max_duration_s"]:
+    min_duration = 20 if plan.get("runtime_exception") else cfg["min_duration_s"]
+    if not simulation and not min_duration <= duration <= cfg["max_duration_s"]:
         errors.append("duration outside approved production range")
     if errors:
         raise ValueError("; ".join(sorted(set(errors))))
@@ -93,7 +98,7 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
                    f"concat=n={len(clips)}:v=1:a=0[raw]")
     if captions:
         subtitle_path = str(output_dir / "captions.srt").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        filters.append(f"[raw]subtitles='{subtitle_path}':force_style='Alignment=2,MarginV=190,FontSize=25'[v]")
+        filters.append(f"[raw]subtitles='{subtitle_path}':force_style='Alignment=2,MarginV=55,FontSize=12,Outline=2'[v]")
     else:
         filters.append("[raw]null[v]")
     filters.append(f"[{len(clips)}:a]atrim=duration={duration:.3f},"
@@ -118,13 +123,13 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
                      "attribution": a["attribution"]} for a in clips],
                 "facts": list({fid for s in plan["segments"] for fid in s["fact_ids"]}),
                 "duration": result["duration"], "test_only": simulation,
+                "runtime_exception": plan.get("runtime_exception"),
                 "voice": settings()["voice"] if not simulation else {"backend": "test_only"}}
     audio_duration = float(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(narration)],
         capture_output=True, text=True, check=True, timeout=60).stdout.strip())
-    audio_timing = audio_duration > 0 and (simulation or
-                    0.8 * duration <= audio_duration <= duration + 0.2)
+    audio_timing = simulation or audio_timing_ok(duration, audio_duration)
     if not simulation:
         black = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(out),
                                 "-vf", "blackdetect=d=0.5:pix_th=0.10",

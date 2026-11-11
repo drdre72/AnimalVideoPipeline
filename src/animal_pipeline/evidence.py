@@ -6,6 +6,10 @@ import sqlite3
 from .core import new_id, now, transaction
 
 NUMBERS = re.compile(r"(?<![\w])-?\d+(?:\.\d+)?")
+QUANTITIES = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|dozens?|hundreds?|thousands?|millions?|billions?|"
+    r"always|never|instantly|instant)\b", re.IGNORECASE)
 
 
 def add_topic(conn: sqlite3.Connection, species: str, scientific_name: str, pillar: str) -> str:
@@ -69,9 +73,14 @@ def validate_segments(conn: sqlite3.Connection, topic_id: str, segments: list[di
             continue
         allowed = {float(n) for fact in facts for n in
                    NUMBERS.findall(fact["statement"] + " " + fact["excerpt"])}
+        support = " ".join(fact["statement"] + " " + fact["excerpt"] for fact in facts)
         for n in NUMBERS.findall(text):
             if float(n) not in allowed:
                 errors.append(f"segment {i}: unsupported number {n}")
+        for match in QUANTITIES.finditer(text):
+            if not re.search(r"\b" + re.escape(match.group()).lower() + r"\b",
+                             support.lower()):
+                errors.append(f"segment {i}: unsupported quantity {match.group()}")
         if topic["scientific_name"].lower() in text.lower() and not facts:
             errors.append(f"segment {i}: species not evidenced")
     return errors

@@ -48,6 +48,9 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("topic_id")
     draft = sub.add_parser("draft", help="Validate and store a structured local plan JSON")
     draft.add_argument("json_path")
+    draft.add_argument("--footage-first", action="store_true",
+                       help="Permit a shorter, non-padded Short with an editorial reason")
+    draft.add_argument("--reason", default="")
     render = sub.add_parser("render", help="Render footage and approved-voice narration")
     render.add_argument("plan_id")
     rev = sub.add_parser("review", help="Inspect current revision, QC and readiness")
@@ -130,7 +133,8 @@ def dispatch(args: argparse.Namespace) -> object:
         if args.command == "plan":
             return creative.generate_plan(conn, args.topic_id)
         if args.command == "draft":
-            return creative.save_plan(conn, json.loads(Path(args.json_path).read_text()))
+            return creative.save_plan(conn, json.loads(Path(args.json_path).read_text()),
+                                      footage_first=args.footage_first, reason=args.reason)
         if args.command == "render":
             return editor.compose(conn, args.plan_id)
         if args.command == "review":

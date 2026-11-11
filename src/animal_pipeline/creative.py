@@ -55,7 +55,14 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
     return plan
 
 
-def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False) -> str:
+def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False,
+              footage_first: bool = False, reason: str = "") -> str:
+    if footage_first:
+        if len(reason.strip()) < 15:
+            raise ValueError("footage-first exception requires an editorial reason")
+        plan = {**plan, "runtime_exception": reason.strip()}
+    elif "runtime_exception" in plan:
+        raise ValueError("runtime exception requires explicit footage-first selection")
     topic_id = plan["topic_id"]
     segments = plan.get("segments", [])
     errors = validate_segments(conn, topic_id, segments)

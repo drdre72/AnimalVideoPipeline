@@ -27,8 +27,9 @@ def review_errors(conn: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
         try:
             video = probe(Path(row["video_path"]))
             cfg = settings()["render"]
+            min_duration = 20 if plan.get("runtime_exception") else cfg["min_duration_s"]
             if video["width"] != cfg["width"] or video["height"] != cfg["height"] or not (
-                    cfg["min_duration_s"] <= video["duration"] <= cfg["max_duration_s"] + 0.2):
+                    min_duration <= video["duration"] <= cfg["max_duration_s"] + 0.2):
                 errors.append("video no longer matches approved output profile")
         except ValueError:
             errors.append("video is corrupt")

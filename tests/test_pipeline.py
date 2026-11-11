@@ -1,5 +1,7 @@
 import json
 import subprocess
+import sys
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +54,12 @@ def test_unsupported_claim_and_number_rejected(conn, setup):
             "fact_ids": [fact]}]) == ["segment 0: unsupported number 99"]
     with pytest.raises(ValueError, match="invalid or stale"):
         creative.save_plan(conn, plan(topic, "invented", asset))
+
+
+def test_spelled_out_magnitude_is_not_exempt_from_fact_gate(conn, setup):
+    topic, fact, asset = setup
+    with pytest.raises(ValueError, match="unsupported quantity"):
+        creative.save_plan(conn, plan(topic, fact, asset, "It has millions of ears."))
 
 
 def test_missing_or_expired_rights(conn, setup):
@@ -150,6 +158,19 @@ def test_wrong_duration_and_narration_block(conn, setup, monkeypatch):
         editor.compose(conn, identifier, Path("/fake/audio.wav"))
 
 
+def test_footage_first_duration_requires_explicit_editorial_reason(conn, setup):
+    topic, fact, asset = setup
+    candidate = plan(topic, fact, asset)
+    with pytest.raises(ValueError, match="reason"):
+        creative.save_plan(conn, candidate, footage_first=True)
+    identifier = creative.save_plan(conn, candidate, footage_first=True,
+                                    reason="Use the available distinct footage, not padding")
+    assert json.loads(conn.execute("SELECT content FROM plans WHERE id=?", (identifier,)
+                           ).fetchone()[0])["runtime_exception"]
+    with pytest.raises(ValueError, match="explicit"):
+        creative.save_plan(conn, {"runtime_exception": "silently bypass", **candidate})
+
+
 def test_new_plan_supersedes_previous_review(conn, setup):
     topic, fact, asset = setup
     first = creative.save_plan(conn, plan(topic, fact, asset))
@@ -167,11 +188,59 @@ def test_voice_failure_is_strict(monkeypatch, tmp_path):
         audio.synthesize("hello", tmp_path / "narration.wav")
 
 
+def test_kokoro_multi_part_narration_is_joined(monkeypatch, tmp_path):
+    from animal_pipeline import audio
+    monkeypatch.setattr(audio, "settings", lambda: {"voice": {
+        "backend": "kokoro_mlx", "approved": True, "name": "af_bella", "model": "local"}})
+    original_run = subprocess.run
+    def run(cmd, **kwargs):
+        if cmd[:3] == [sys.executable, "-m", "mlx_audio.tts.generate"]:
+            prefix = Path(cmd[cmd.index("--file_prefix") + 1])
+            for i in range(2):
+                with wave.open(str(prefix.parent / f"{prefix.name}_{i:03d}.wav"), "wb") as out:
+                    out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                    out.writeframes(b"\0\0" * 24000)
+            return subprocess.CompletedProcess(cmd, 0)
+        return original_run(cmd, **kwargs)
+    monkeypatch.setattr(audio.subprocess, "run", run)
+    result = audio.synthesize("long narration", tmp_path / "narration.wav")
+    with wave.open(str(result)) as combined:
+        assert combined.getnframes() == 48000
+
+
 def test_failed_alignment_blocks_render(monkeypatch, tmp_path):
     from animal_pipeline import audio
     monkeypatch.setattr(audio, "settings", lambda: {"alignment": {"model_path": "missing.bin"}})
     with pytest.raises(RuntimeError, match="whisper.cpp"):
         audio.align(tmp_path / "audio.wav", "Script", tmp_path / "out")
+
+
+def test_whisper_caption_times_are_clamped_to_audio(tmp_path, monkeypatch):
+    from animal_pipeline import audio
+    source = tmp_path / "short.wav"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                    str(source)], check=True, timeout=60)
+    model = tmp_path / "model.bin"
+    model.touch()
+    monkeypatch.setattr(audio, "settings", lambda: {"alignment": {"model_path": str(model)}})
+    original_run = subprocess.run
+    def run(cmd, **kwargs):
+        if cmd[0] == "whisper-cli":
+            Path(cmd[cmd.index("-of") + 1] + ".json").write_text(
+                json.dumps({"transcription": [{"offsets": {"from": 0, "to": 30000},
+                                                 "text": "Three seconds of audio"}]}))
+            return subprocess.CompletedProcess(cmd, 0)
+        return original_run(cmd, **kwargs)
+    monkeypatch.setattr(audio.subprocess, "run", run)
+    captions = audio.align(source, "Three seconds of audio", tmp_path / "timing")
+    assert captions[-1]["end"] == 3
+    assert all(len(c["text"]) <= 42 for c in captions)
+
+
+def test_excessive_tail_silence_fails_audio_gate():
+    assert not editor.audio_timing_ok(46, 37.875)
+    assert editor.audio_timing_ok(40, 37.875)
 
 
 def test_rights_expiration_after_render_blocks_review(conn, setup, monkeypatch):
