@@ -8,6 +8,7 @@ workers:
   queue_size: 16
   max_attempts: 3
   stale_after_s: 1800
+  circuit_breaker: 3
   llm: 1
   tts: 1
   alignment: 1

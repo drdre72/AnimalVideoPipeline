@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS youtube_videos (
  title TEXT NOT NULL, channel_id TEXT NOT NULL, published_at TEXT NOT NULL,
  duration_s REAL, first_seen_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS runs (
+ id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
+ summary TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS competitors (
  id TEXT PRIMARY KEY, channel TEXT NOT NULL, video_id TEXT NOT NULL,
  title TEXT NOT NULL, category TEXT NOT NULL, uploaded_at TEXT NOT NULL,

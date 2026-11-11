@@ -73,8 +73,10 @@ async def drain(conn: sqlite3.Connection, renderer, *, limit: int = 1) -> list[d
                         (min(limit, queue.maxsize),)).fetchall()
     for row in rows:
         queue.put_nowait(row)
+    consecutive_failures = 0
+    breaker = settings()["workers"].get("circuit_breaker", 3)
     while not queue.empty():
-        if resource_errors():
+        if resource_errors() or consecutive_failures >= breaker:
             break
         row = await queue.get()
         with transaction(conn):
@@ -88,8 +90,10 @@ async def drain(conn: sqlite3.Connection, renderer, *, limit: int = 1) -> list[d
             conn.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",
                          (str(exc)[:500], row["id"]))
             results.append({"id": row["id"], "error": str(exc)})
+            consecutive_failures += 1
         else:
             conn.execute("UPDATE jobs SET status='done',error='' WHERE id=?", (row["id"],))
             results.append({"id": row["id"], "result": result})
+            consecutive_failures = 0
         queue.task_done()
     return results

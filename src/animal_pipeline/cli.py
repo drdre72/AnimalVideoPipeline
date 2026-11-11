@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import platform
 import shutil
 import sqlite3
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import analytics, commons, competitors, creative, editor, evidence, google_auth, media, research, review, scheduler, server, service, youtube
@@ -101,7 +103,8 @@ def parser() -> argparse.ArgumentParser:
     bench.add_argument("path", nargs="?")
     sub.add_parser("simulate", help="Run synthetic nonpublishable fixture demonstration")
     svc = sub.add_parser("services", help="Manage the local launchd desk agent")
-    svc.add_argument("action", choices=("install", "status", "uninstall"))
+    svc.add_argument("action", choices=("install", "status", "pause", "resume",
+                                       "health", "uninstall"))
     yt = sub.add_parser("youtube", help="Authorized read-only YouTube integration")
     yt.add_argument("action", choices=("migrate", "auth", "status", "sync",
                                        "analytics", "competitors", "link", "upload"))
@@ -115,18 +118,47 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def _ollama_up(cfg: dict) -> bool:
+    import urllib.request
+    base = cfg.get("llm", {}).get("base_url", "")
+    if not base:
+        return False
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/api/tags", timeout=3) as response:
+            return response.status == 200
+    except (OSError, ValueError):
+        return False
+
+
 def doctor() -> dict:
     cfg = settings()
     encoders = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=30
                               ).stdout if shutil.which("ffmpeg") else ""
-    return {"machine": platform.machine(), "macos": platform.system() == "Darwin",
-            "ffmpeg": bool(shutil.which("ffmpeg")), "ffprobe": bool(shutil.which("ffprobe")),
-            "videotoolbox": "h264_videotoolbox" in encoders,
-            "whisper": bool(shutil.which("whisper-cli")),
-            "whisper_model": (ROOT / cfg["alignment"]["model_path"]).is_file(),
-            "ollama": bool(shutil.which("ollama")),
-            "voice_approved": cfg["voice"]["approved"],
-            "free_gb": round(shutil.disk_usage(ROOT).free / 1024**3, 1),
+    kokoro = False
+    try:
+        import mlx_audio  # noqa: F401
+        kokoro = True
+    except ImportError:
+        pass
+    free_gb = round(shutil.disk_usage(ROOT).free / 1024**3, 1)
+    required = {"macos_arm64": platform.system() == "Darwin" and platform.machine() == "arm64",
+                "ffmpeg": bool(shutil.which("ffmpeg")),
+                "ffprobe": bool(shutil.which("ffprobe")),
+                "videotoolbox_encoder": "h264_videotoolbox" in encoders,
+                "whisper": bool(shutil.which("whisper-cli")),
+                "whisper_model": (ROOT / cfg["alignment"]["model_path"]).is_file(),
+                "kokoro_importable": kokoro,
+                "voice_approved": cfg["voice"]["approved"],
+                "disk_free": free_gb >= cfg["storage"]["min_free_gb"]}
+    optional = {"ollama_installed": bool(shutil.which("ollama")),
+                "ollama_reachable": _ollama_up(cfg),
+                "youtube_authorized": bool(google_auth.load_store().get("refresh_token")),
+                "youtube_configured": bool(google_auth.load_store().get("client_id")),
+                "launchd_installed": (service.AGENTS / f"{service.LABEL}.plist").is_file()}
+    return {"required": required, "optional": optional,
+            "ok": all(required.values()),
+            "missing_required": sorted(k for k, v in required.items() if not v),
+            "machine": platform.machine(), "free_gb": free_gb,
             "publishing_enabled": False}
 
 
@@ -207,19 +239,42 @@ def dispatch(args: argparse.Namespace) -> object:
             return {"requeued": scheduler.retry(conn, args.job_id)}
         if args.command == "run":
             cfg = settings()
+            run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{os.getpid()}"
+            conn.execute("INSERT INTO runs(id,started_at) VALUES(?,?)",
+                         (run_id, datetime.now(timezone.utc).isoformat()))
+            syncs = {}
+            store = google_auth.load_store()
+            if cfg.get("youtube", {}).get("enabled") and store.get("refresh_token"):
+                for name, fn in (("uploads", youtube.sync_uploads),
+                                 ("analytics", youtube.sync_analytics),
+                                 ("competitors", youtube.sync_competitors)):
+                    try:
+                        syncs[name] = fn(conn)
+                    except Exception as exc:
+                        syncs[name] = {"error": str(exc)[:200]}
             target = cfg["production"]["daily_review_target"]
-            drafted = ({"drafted": [], "errors": {}} if args.no_draft
-                       else creative.draft_ready(conn, limit=target))
+            if args.no_draft:
+                drafted, draft_stage = {"drafted": [], "errors": {}}, "SKIPPED"
+            elif not _ollama_up(cfg):
+                drafted, draft_stage = {"drafted": [], "errors": {}}, "WAITING_FOR_MODEL"
+            else:
+                drafted, draft_stage = creative.draft_ready(conn, limit=target), "DRAFTED"
             ready = conn.execute(
                 "SELECT id FROM plans WHERE status='SCRIPT_READY' ORDER BY created_at LIMIT ?",
                 (target,)).fetchall()
             enqueued = sum(1 for row in ready if scheduler.enqueue(conn, "render", row["id"]))
             recovered = scheduler.recover(conn)
             limit = args.limit or cfg["workers"]["queue_size"]
-            return {"drafted": drafted["drafted"], "plan_errors": drafted["errors"],
-                    "needs_media": drafted.get("needs_media", {}),
-                    "enqueued": enqueued, "recovered": recovered,
-                    "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
+            summary = {"draft_stage": draft_stage, "syncs": syncs,
+                       "drafted": drafted["drafted"], "plan_errors": drafted["errors"],
+                       "needs_media": drafted.get("needs_media", {}),
+                       "needs_evidence": drafted.get("needs_evidence", {}),
+                       "enqueued": enqueued, "recovered": recovered,
+                       "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
+            conn.execute("UPDATE runs SET finished_at=?,summary=? WHERE id=?",
+                         (datetime.now(timezone.utc).isoformat(),
+                          json.dumps(summary, default=str), run_id))
+            return summary
         if args.command == "serve":
             return server.serve(port=args.port)
         if args.command == "services":
@@ -227,6 +282,12 @@ def dispatch(args: argparse.Namespace) -> object:
                 return service.install(ROOT, service.AGENTS)
             if args.action == "status":
                 return service.status()
+            if args.action == "pause":
+                return service.pause(ROOT)
+            if args.action == "resume":
+                return service.resume(ROOT)
+            if args.action == "health":
+                return service.health(ROOT)
             return service.uninstall()
         if args.command == "analytics":
             if args.action == "import":

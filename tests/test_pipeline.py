@@ -682,6 +682,57 @@ def test_triage_page_lists_pending_verification_commands(conn, setup):
     assert fact not in page  # approved facts need no action
 
 
+def test_service_pause_resume_and_health(tmp_path, monkeypatch):
+    from animal_pipeline import service
+    calls = []
+    class Proc:
+        def __init__(self, stdout="", rc=0):
+            self.stdout, self.returncode = stdout, rc
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "print-disabled" in cmd:
+            return Proc("disabled\n" if service._paused_marker(tmp_path).is_file()
+                        else "enabled\n")
+        return Proc()
+    monkeypatch.setattr(service.subprocess, "run", fake_run)
+    monkeypatch.setattr(service, "AGENTS", tmp_path / "agents")
+    assert service.pause(tmp_path)["paused"] is True
+    assert service._paused_marker(tmp_path).is_file()
+    assert "disable" in calls[-1]
+    assert service.resume(tmp_path)["paused"] is False
+    assert "enable" in calls[-1]
+    health = service.health(tmp_path)
+    assert health["paused"] is False and "log_dir" in health
+
+
+def test_drain_circuit_breaker_stops_consecutive_failures(conn, setup, monkeypatch):
+    topic, fact, asset = setup
+    ids = [creative.save_plan(conn, plan(topic, fact, asset)) for _ in range(3)]
+    for plan_id in ids:
+        scheduler.enqueue(conn, "render", plan_id)
+    def broken(c, target):
+        raise RuntimeError("renderer down")
+    results = asyncio.run(scheduler.drain(conn, broken, limit=3))
+    assert len(results) == 3  # attempts bound also breaks
+    assert all("error" in r for r in results)
+
+
+def test_ollama_unavailable_marks_waiting_for_model(conn, setup, monkeypatch):
+    from animal_pipeline import cli
+    topic, fact, asset = setup
+    monkeypatch.setattr(cli, "_ollama_up", lambda cfg: False)
+    monkeypatch.setattr(cli, "connect", lambda *a, **kw: conn)
+    summary = cli.dispatch(argparse_for("run"))
+    assert summary["draft_stage"] == "WAITING_FOR_MODEL"
+    assert not summary["drafted"]
+
+
+def argparse_for(*argv):
+    import argparse
+    parser = __import__("animal_pipeline.cli", fromlist=["cli"]).parser()
+    return parser.parse_args(list(argv))
+
+
 def test_review_ui_serves_over_http(conn, setup, tmp_path):
     import threading
     import urllib.request

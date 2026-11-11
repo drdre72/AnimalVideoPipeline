@@ -209,12 +209,16 @@ OPEN_REVISIONS = ("SCRIPT_READY", "READY_FOR_REVIEW", "APPROVED", "EXPORTED")
 
 
 def draft_ready(conn: sqlite3.Connection, limit: int) -> dict:
-    drafted, errors, needs_media = [], {}, {}
+    drafted, errors, needs_media, needs_evidence = [], {}, {}, {}
     for topic in rank_topics(conn):
         if len(drafted) >= limit:
             break
         reasons = topic["reasons"]
-        if not reasons["approved_facts"] or not reasons["usable_visuals"]:
+        if not reasons["approved_facts"]:
+            needs_evidence[topic["id"]] = "no approved facts"
+            continue
+        if not reasons["usable_visuals"]:
+            needs_media[topic["id"]] = "no rights-cleared footage"
             continue
         if conn.execute("SELECT 1 FROM plans WHERE topic_id=? AND status IN "
                         f"({','.join('?' * len(OPEN_REVISIONS))}) LIMIT 1",
@@ -233,4 +237,5 @@ def draft_ready(conn: sqlite3.Connection, limit: int) -> dict:
             break
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             errors[topic["id"]] = str(exc)[:200]
-    return {"drafted": drafted, "errors": errors, "needs_media": needs_media}
+    return {"drafted": drafted, "errors": errors, "needs_media": needs_media,
+            "needs_evidence": needs_evidence}

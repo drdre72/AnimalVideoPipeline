@@ -65,3 +65,42 @@ def uninstall() -> dict:
     path.unlink(missing_ok=True)
     return {"label": LABEL, "removed": not path.exists(),
             "bootout": result.returncode == 0}
+
+
+def _paused_marker(root: Path) -> Path:
+    return root / "output" / "logs" / "desk.paused"
+
+
+def pause(root: Path) -> dict:
+    """Stop future runs without removing the installed agent."""
+    (root / "output" / "logs").mkdir(parents=True, exist_ok=True)
+    _paused_marker(root).write_text("paused\n")
+    result = subprocess.run(
+        ["launchctl", "disable", f"gui/{os.getuid()}/{LABEL}"],
+        capture_output=True, text=True, timeout=30)
+    return {"label": LABEL, "paused": True,
+            "launchctl_disabled": result.returncode == 0}
+
+
+def resume(root: Path) -> dict:
+    _paused_marker(root).unlink(missing_ok=True)
+    result = subprocess.run(
+        ["launchctl", "enable", f"gui/{os.getuid()}/{LABEL}"],
+        capture_output=True, text=True, timeout=30)
+    return {"label": LABEL, "paused": False,
+            "launchctl_enabled": result.returncode == 0}
+
+
+def health(root: Path) -> dict:
+    log_dir = root / "output" / "logs"
+    logs = sorted(log_dir.glob("desk.*.log"), key=lambda p: p.stat().st_mtime,
+                  reverse=True) if log_dir.is_dir() else []
+    latest = logs[0] if logs else None
+    age = None
+    if latest:
+        import time
+        age = round(time.time() - latest.stat().st_mtime, 1)
+    return {"label": LABEL, "plist_installed": (AGENTS / f"{LABEL}.plist").is_file(),
+            "paused": _paused_marker(root).is_file(), "log_dir": str(log_dir),
+            "latest_log": latest.name if latest else None, "latest_log_age_s": age,
+            "note": "paused agents skip scheduled runs; resume to continue"}
