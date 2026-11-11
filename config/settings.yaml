@@ -26,12 +26,15 @@ render:
   encoder: h264_videotoolbox
   min_duration_s: 61
   max_duration_s: 70
+  loudness_target: -14
+  loudness_tolerance: 1.5
 voice:
   backend: kokoro_mlx
   model: mlx-community/Kokoro-82M-bf16
   approved: true
   name: af_bella
   strict: true
+  max_gain_db: 20
 alignment:
   model_path: models/ggml-base.en.bin
 llm:

@@ -337,6 +337,27 @@ def test_excessive_tail_silence_fails_audio_gate():
     assert editor.audio_timing_ok(40, 37.875)
 
 
+def test_loudness_measurement_and_bounded_gain(tmp_path):
+    loud = tmp_path / "loud.wav"
+    quiet = tmp_path / "quiet.wav"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3", str(loud)],
+                   check=True, timeout=60)
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3,volume=0.02",
+                    str(quiet)], check=True, timeout=60)
+    measured = editor.loudness_lufs(loud)
+    assert -40 < measured < 0
+    gain = editor.narration_gain(loud)
+    normalized = tmp_path / "normalized.wav"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(loud),
+                    "-af", f"volume={gain:.2f}dB,alimiter=limit=0.891:level=false",
+                    str(normalized)], check=True, timeout=60)
+    assert abs(editor.loudness_lufs(normalized) - (-14)) <= 1.5
+    with pytest.raises(RuntimeError, match="unsafe"):
+        editor.narration_gain(quiet)
+
+
 def test_rights_expiration_after_render_blocks_review(conn, setup, monkeypatch):
     topic, fact, asset = setup
     identifier = creative.save_plan(conn, plan(topic, fact, asset))

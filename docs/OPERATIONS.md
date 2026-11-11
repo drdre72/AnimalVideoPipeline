@@ -43,6 +43,12 @@ Enqueueing is idempotent on `(kind, target_id)`, so repeat runs do not
 duplicate work. Rendering stays serial: one VideoToolbox encode and one
 SQLite writer at a time on this hardware.
 
+Production renders normalize narration toward `render.loudness_target`
+(-14 LUFS) with a static gain capped by `voice.max_gain_db` and an
+`alimiter` ceiling, then verify the finished file with ebur128 inside
+`render.loudness_tolerance`. A narration track needing more than the cap
+fails before encoding; a render drifting outside the band fails QC.
+
 `research-search` and `research-propose <topic_id> <title>` use the official
 Wikipedia API over the same bounded-HTTPS boundary as Commons (`--allow-network`
 required). `research-propose` fetches only the article's plain-text intro,

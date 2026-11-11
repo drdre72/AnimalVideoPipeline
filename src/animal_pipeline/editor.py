@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -30,6 +31,26 @@ def _encoder() -> str:
 
 def audio_timing_ok(video_duration: float, audio_duration: float) -> bool:
     return video_duration > 0 and 0.92 * video_duration <= audio_duration <= video_duration + 0.2
+
+
+def loudness_lufs(path: Path) -> float:
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path),
+                             "-af", "ebur128", "-f", "null", "-"],
+                            capture_output=True, text=True, timeout=600)
+    summary = result.stderr.rsplit("Summary:", 1)[-1]
+    match = re.search(r"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", summary)
+    if result.returncode or not match:
+        raise RuntimeError("could not measure integrated loudness")
+    return float(match.group(1))
+
+
+def narration_gain(path: Path) -> float:
+    cfg = settings()
+    measured = loudness_lufs(path)
+    gain = cfg["render"]["loudness_target"] - measured
+    if abs(gain) > cfg["voice"]["max_gain_db"]:
+        raise RuntimeError(f"narration at {measured:.1f} LUFS needs unsafe {gain:.1f} dB gain")
+    return gain
 
 
 def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = None, *,
@@ -89,10 +110,12 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
             f"crop={width}:{height}:x=(iw-{width})*{focus:.3f}:y=(ih-{height})/2,"
             f"setsar=1,trim=duration={float(shot['duration_s']):.3f},setpts=PTS-STARTPTS[v{i}]")
     captions = []
+    gain_db = 0.0
     if not simulation:
         captions = align(narration, " ".join(s["text"] for s in plan["segments"]),
                          output_dir / "alignment")
         write_srt(captions, output_dir / "captions.srt")
+        gain_db = narration_gain(narration)
     args += ["-i", str(narration)]
     filters.append("".join(f"[v{i}]" for i in range(len(clips))) +
                    f"concat=n={len(clips)}:v=1:a=0[raw]")
@@ -101,8 +124,10 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         filters.append(f"[raw]subtitles='{subtitle_path}':force_style='Alignment=2,MarginV=55,FontSize=12,Outline=2'[v]")
     else:
         filters.append("[raw]null[v]")
+    loudness_chain = (f",volume={gain_db:.2f}dB,alimiter=limit=0.891:level=false"
+                      if not simulation else "")
     filters.append(f"[{len(clips)}:a]atrim=duration={duration:.3f},"
-                   f"apad=whole_dur={duration:.3f},asetpts=PTS-STARTPTS[a]")
+                   f"apad=whole_dur={duration:.3f},asetpts=PTS-STARTPTS{loudness_chain}[a]")
     args += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
              "-c:v", _encoder(), "-b:v", "8M", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-t", f"{duration:.3f}",
@@ -138,14 +163,21 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         visual_ok = black.returncode == 0 and "black_start:" not in black.stderr
     else:
         visual_ok = False
-    qc = {"ok": not simulation and visual_ok and audio_timing,
+    try:
+        loudness = None if simulation else loudness_lufs(out)
+        loudness_ok = simulation or abs(
+            loudness - cfg["loudness_target"]) <= cfg["loudness_tolerance"]
+    except RuntimeError:
+        loudness, loudness_ok = None, False
+    qc = {"ok": not simulation and visual_ok and audio_timing and loudness_ok,
           "voice": settings()["voice"] if not simulation else None,
+          "loudness_lufs": loudness, "loudness_gain_db": None if simulation else gain_db,
           "checks": {"format": True, "rights": not simulation,
                      "claims": not errors, "narration": bool(audio),
                      "audio_timing": audio_timing, "no_black_intervals": visual_ok,
-                     "captions": bool(captions)},
+                     "loudness": loudness_ok, "captions": bool(captions)},
           "limitations": ["visual species and semantic citations require operator review",
-                          "audio loudness and subject crop accuracy need operator review"]}
+                          "subject crop accuracy needs operator review"]}
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     conn.execute("UPDATE plans SET status=?,video_path=?,video_hash=?,qc=? WHERE id=?",
                  ("READY_FOR_REVIEW" if qc["ok"] else "QC_FAILED", str(out),
