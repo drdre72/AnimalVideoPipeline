@@ -3,10 +3,29 @@ from __future__ import annotations
 import json
 import sqlite3
 import urllib.request
+from datetime import datetime
 
 from .core import canonical_hash, new_id, now, settings
 from .evidence import validate_segments
 from .media import rights_errors
+
+
+def _topic_feedback(conn: sqlite3.Connection, topic_id: str) -> float | None:
+    rows = conn.execute(
+        "SELECT a.video_id, a.platform, a.views, a.published_at, a.observed_at "
+        "FROM analytics a JOIN plans p ON p.id = a.video_id "
+        "WHERE p.topic_id=?", (topic_id,)).fetchall()
+    latest: dict[tuple[str, str], sqlite3.Row] = {}
+    for row in rows:
+        key = (row["video_id"], row["platform"])
+        if key not in latest or row["observed_at"] > latest[key]["observed_at"]:
+            latest[key] = row
+    rates = []
+    for row in latest.values():
+        age = (datetime.fromisoformat(row["observed_at"]) -
+               datetime.fromisoformat(row["published_at"])).total_seconds() / 86400
+        rates.append(row["views"] / max(age, 1))
+    return sorted(rates)[len(rates) // 2] if rates else None
 
 
 def rank_topics(conn: sqlite3.Connection) -> list[dict]:
@@ -16,8 +35,13 @@ def rank_topics(conn: sqlite3.Connection) -> list[dict]:
                              (topic["id"],)).fetchone()[0]
         assets = [a for a in conn.execute("SELECT * FROM assets WHERE species=?", (topic["species"],))
                   if not rights_errors(a)]
-        score = min(facts, 5) * 2 + min(len(assets), 3) * 5
+        views_per_day = _topic_feedback(conn, topic["id"])
+        boost = min(views_per_day / 50, 8) if views_per_day else 0.0
+        score = min(facts, 5) * 2 + min(len(assets), 3) * 5 + boost
         reasons = {"approved_facts": facts, "usable_visuals": len(assets),
+                   "analytics": ({"median_views_per_day": round(views_per_day, 2),
+                                  "rank_boost": round(boost, 2)}
+                                 if views_per_day is not None else "no observed performance"),
                    "method": "editorial heuristic, not a virality prediction"}
         conn.execute("UPDATE topics SET score=?,reasons=? WHERE id=?",
                      (score, json.dumps(reasons), topic["id"]))

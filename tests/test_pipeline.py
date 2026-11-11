@@ -136,6 +136,33 @@ def test_rank_prefers_approved_visuals(conn, setup):
     assert creative.rank_topics(conn)[0]["id"] == topic
 
 
+def test_observed_performance_changes_topic_ranking(conn, setup):
+    topic, fact, asset = setup
+    second = evidence.add_topic(conn, "Second animal", "Species two", "Tiny but Extraordinary")
+    second_fact = evidence.add_fact(conn, second, "It exists.", "Org", "local:s",
+                                    "It exists.", "2026-01-01")
+    evidence.approve_fact(conn, second_fact)
+    footage_path = Path(conn.execute("SELECT path FROM assets WHERE id=?",
+                                     (asset,)).fetchone()[0])
+    second_asset = media.import_asset(conn, footage_path, source_ref="local:fixture2",
+                                      creator="Test operator", license_type="original",
+                                      evidence="fixture", attribution="Test operator",
+                                      species="Second animal", commercial=True,
+                                      modifications=True)
+    media.approve_asset(conn, second_asset)
+    plan_id = creative.save_plan(conn, plan(second, second_fact, second_asset, "It exists."))
+    conn.execute("INSERT INTO analytics VALUES(?,?,?,?,?,?,?,?,?,?)",
+                 ("s1", plan_id, "youtube", "2026-01-05T00:00:00+00:00",
+                  "2026-01-03T00:00:00+00:00", 1000, None, None, None, "operator import"))
+    ranking = creative.rank_topics(conn)
+    assert ranking[0]["id"] == second
+    assert ranking[0]["reasons"]["analytics"]["median_views_per_day"] == 500
+    conn.execute("INSERT INTO analytics VALUES(?,?,?,?,?,?,?,?,?,?)",
+                 ("s2", plan_id, "youtube", "2026-01-20T00:00:00+00:00",
+                  "2026-01-03T00:00:00+00:00", 0, None, None, None, "operator import"))
+    assert creative.rank_topics(conn)[0]["id"] == topic
+
+
 def test_analytics_import_age_normalization(conn, tmp_path):
     path = tmp_path / "snapshot.json"
     path.write_text(json.dumps([{"video_id": "v1", "platform": "youtube",
