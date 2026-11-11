@@ -22,6 +22,11 @@ publishing:
   uploads_enabled: false
   messaging_enabled: false
   destinations: []
+footage:
+  max_shot_s: 30
+  micro_min_s: 15
+  standard_min_s: 30
+  narration_wps: 2.4
 render:
   width: 1080
   height: 1920
@@ -29,6 +34,7 @@ render:
   encoder: h264_videotoolbox
   min_duration_s: 61
   max_duration_s: 70
+  exception_min_duration_s: 15
   loudness_target: -14
   loudness_tolerance: 1.5
 voice:

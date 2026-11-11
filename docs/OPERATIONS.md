@@ -29,15 +29,30 @@ the preview does not approve the asset or authorize distribution.
 
 For footage shorter than the default 61-second target, `draft <plan.json>
 --footage-first --reason "Use distinct footage rather than padding"` records
-an explicit editorial exception for a 20–70-second Short. This does not
+an explicit editorial exception for a 15–70-second Short. This does not
 bypass fact, rights, captions, audio, QC or exact-revision review.
+
+Before any plan call, `budget.footage_budget` computes a deterministic
+contract: which rights-cleared assets verify the topic's species (exact tag,
+or a more specific tag inside a configured `taxonomy` family — a generic
+clip never satisfies a specific topic), usable seconds per asset, in/out
+windows, the maximum shot length, a narration word estimate, and the
+selected production profile: EXTENDED (>=61 s usable), STANDARD (30–60),
+MICRO (15–29) or NEEDS_MEDIA with an actionable reason. `generate_plan`
+hands the whole contract to the LLM; `save_plan` re-checks it
+deterministically and rejects plans whose total segment duration exceeds
+usable footage or whose shots break the windows or shot cap. `run` drafts
+non-EXTENDED profiles by passing the recorded profile reason as the
+footage-first exception, and reports NEEDS_MEDIA topics under
+`needs_media` rather than attempting them.
 
 `run` is one bounded batch. It first drafts plans for ranked topics that
 have approved facts and footage but no open revision
 (`SCRIPT_READY`/`READY_FOR_REVIEW`/`APPROVED`/`EXPORTED`), up to
 `production.daily_review_target`; a draft that fails validation is recorded
-in `plan_errors` and never stored, and an unreachable planner stops the
-drafting phase only. It then enqueues `SCRIPT_READY` plans, recovers stale
+in `plan_errors` and never stored, a topic whose footage budget is below
+the micro floor is reported under `needs_media`, and an unreachable
+planner stops the drafting phase only. It then enqueues `SCRIPT_READY` plans, recovers stale
 `running` jobs (claimed longer than `workers.stale_after_s`, or claimed
 before `claimed_at` existed) and requeues `failed` jobs that still have
 attempts under `workers.max_attempts`, then drains queued jobs serially up

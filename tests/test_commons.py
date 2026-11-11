@@ -93,6 +93,37 @@ def test_commons_url_guard_rejects_downgrades_and_lookalikes(url):
         commons._check_url(url, {commons.MEDIA_HOST})
 
 
+def test_commons_accepts_cc0_license_url_variants(tmp_path, monkeypatch, footage):
+    metadata = _metadata(license_name="CC0").replace(
+        b"https://creativecommons.org/licenses/by/2.0",
+        b"http://creativecommons.org/publicdomain/zero/1.0/deed.en")
+    def open_response(url, hosts):
+        return Response(metadata if "api.php" in url else footage, url)
+    monkeypatch.setattr(commons, "_open", open_response)
+    conn = connect(tmp_path / "catalog.db")
+    asset_id = commons.import_video(conn, "File:Pfefferi.ogv", "Flamboyant cuttlefish",
+                                    tmp_path / "cache")
+    assert conn.execute("SELECT license_type,approved FROM assets WHERE id=?",
+                        (asset_id,)).fetchone()[:] == ("CC0", 0)
+    conn.close()
+
+
+@pytest.mark.parametrize("license_url", [
+    "https://creativecommons.org/publicdomain/zero/2.0",
+    "https://creativecommons.org.evil.test/licenses/by/2.0",
+    "https://creativecommons.org/licenses/by-sa/4.0",
+])
+def test_commons_rejects_wrong_license_url(tmp_path, monkeypatch, license_url):
+    metadata = _metadata().replace(b"https://creativecommons.org/licenses/by/2.0",
+                                   license_url.encode())
+    monkeypatch.setattr(commons, "_open",
+                        lambda url, hosts: Response(metadata, url))
+    conn = connect(tmp_path / "catalog.db")
+    with pytest.raises(ValueError, match="license"):
+        commons.import_video(conn, "File:Octopus.ogv", "Day octopus", tmp_path / "cache")
+    conn.close()
+
+
 def test_commons_search_lists_video_titles_without_download(monkeypatch):
     payload = json.dumps({"query": {"search": [
         {"title": "File:Octopus.ogv"}, {"title": "File:Octopus.ogv"},

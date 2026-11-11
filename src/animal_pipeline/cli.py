@@ -207,6 +207,7 @@ def dispatch(args: argparse.Namespace) -> object:
             recovered = scheduler.recover(conn)
             limit = args.limit or cfg["workers"]["queue_size"]
             return {"drafted": drafted["drafted"], "plan_errors": drafted["errors"],
+                    "needs_media": drafted.get("needs_media", {}),
                     "enqueued": enqueued, "recovered": recovered,
                     "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
         if args.command == "serve":

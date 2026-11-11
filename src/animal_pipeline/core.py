@@ -20,6 +20,10 @@ def settings() -> dict:
     return yaml.safe_load((ROOT / "config/settings.yaml").read_text())
 
 
+def content() -> dict:
+    return yaml.safe_load((ROOT / "config/content.yaml").read_text())
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

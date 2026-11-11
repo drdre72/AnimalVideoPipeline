@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from animal_pipeline import analytics, competitors, creative, editor, evidence, media, review, scheduler, server
+from animal_pipeline import analytics, budget, competitors, creative, editor, evidence, media, review, scheduler, server
 from animal_pipeline.core import connect
 
 
@@ -185,6 +185,11 @@ def test_draft_ready_is_bounded_idempotent_and_fail_closed(conn, setup, monkeypa
     topic, fact, asset = setup
     monkeypatch.setattr(creative, "generate_plan",
                         lambda c, t: plan(t, fact, asset))
+    monkeypatch.setattr(creative, "footage_budget",
+                        lambda c, t, **kw: {"needs_media": False, "profile": "EXTENDED",
+                                            "reason": "extended profile fits", "target_s": 65,
+                                            "total_usable_s": 65,
+                                            "limits": {"max_shot_s": 30, "max_total_s": 65}})
     result = creative.draft_ready(conn, limit=2)
     assert result["drafted"] and not result["errors"]
     assert conn.execute("SELECT status FROM plans").fetchone()[0] == "SCRIPT_READY"
@@ -211,6 +216,11 @@ def test_draft_ready_is_bounded_idempotent_and_fail_closed(conn, setup, monkeypa
 
 def test_draft_ready_stops_when_planner_unavailable(conn, setup, monkeypatch):
     topic, fact, asset = setup
+    monkeypatch.setattr(creative, "footage_budget",
+                        lambda c, t, **kw: {"needs_media": False, "profile": "EXTENDED",
+                                            "reason": "extended profile fits", "target_s": 65,
+                                            "total_usable_s": 65,
+                                            "limits": {"max_shot_s": 30, "max_total_s": 65}})
     def unavailable(c, t):
         raise OSError("connection refused")
     monkeypatch.setattr(creative, "generate_plan", unavailable)
@@ -525,6 +535,8 @@ def test_real_mp4_probe_and_synthetic_review_block(footage, tmp_path, monkeypatc
     monkeypatch.setattr(editing, "ROOT", tmp_path)
     monkeypatch.setattr(editing, "settings", lambda: render_settings)
     monkeypatch.setattr(review, "settings", lambda: render_settings)
+    monkeypatch.setattr(budget, "settings", lambda: render_settings)
+    monkeypatch.setattr(budget, "content", lambda: {})
     db = connect(tmp_path / "test.db")
     topic = evidence.add_topic(db, "Synthetic pattern", "Fixture", "Test")
     fact = evidence.add_fact(db, topic, "This is a test.", "Fixtures", "local",
@@ -643,3 +655,136 @@ def test_review_ui_serves_over_http(conn, setup, tmp_path):
         assert "Review queue" in urllib.request.urlopen(url, timeout=5).read().decode()
     finally:
         httpd.shutdown()
+
+
+def clip(tmp_path, name, seconds):
+    path = tmp_path / name
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"testsrc2=s=320x240:r=30:d={seconds}",
+                    "-c:v", "h264_videotoolbox", "-b:v", "1M", str(path)],
+                   check=True, timeout=120)
+    return path
+
+
+def approved_clip(conn, path, species, behavior=""):
+    asset = media.import_asset(conn, path, source_ref="local:clip", creator="Op",
+                               license_type="original", evidence="fixture",
+                               attribution="Op", species=species, behavior=behavior,
+                               commercial=True, modifications=True)
+    media.approve_asset(conn, asset)
+    return asset
+
+
+def test_footage_budget_contract_reports_assets_limits_and_review(conn, tmp_path):
+    topic = evidence.add_topic(conn, "Budget animal", "Species budget", "Tiny but Extraordinary")
+    asset = approved_clip(conn, clip(tmp_path, "a.mp4", 17), "Budget animal",
+                          behavior="display behaviour")
+    result = budget.footage_budget(conn, topic)
+    assert result["total_usable_s"] == pytest.approx(17, abs=0.5)
+    entry = result["assets"][0]
+    assert entry["asset_id"] == asset and entry["species_match"] == "exact"
+    assert entry["in_s"] == 0 and entry["out_s"] == pytest.approx(17, abs=0.5)
+    assert entry["behavior"] == "display behaviour" and entry["rights_ok"]
+    assert result["limits"]["max_shot_s"] > 0
+    assert result["limits"]["max_total_s"] == pytest.approx(17, abs=0.5)
+    assert result["narration"]["estimated_max_words"] > 0
+    assert result["visual_supplements"] == []
+    assert result["required_review"]
+
+
+def test_derived_species_footage_is_one_directional(conn, tmp_path):
+    generic = evidence.add_topic(conn, "Mantis shrimp", "Stomatopoda", "Tiny but Extraordinary")
+    specific = evidence.add_topic(conn, "Peacock mantis shrimp", "Odontodactylus scyllarus",
+                                  "Tiny but Extraordinary")
+    approved_clip(conn, clip(tmp_path, "peacock.mp4", 10), "Peacock mantis shrimp")
+    approved_clip(conn, clip(tmp_path, "generic.mp4", 14), "Mantis shrimp")
+    generic_budget = budget.footage_budget(conn, generic)
+    matches = {a["asset_id"]: a["species_match"] for a in generic_budget["assets"]}
+    assert set(matches.values()) == {"exact", "derived"}
+    assert generic_budget["total_usable_s"] == pytest.approx(24, abs=0.5)
+    specific_budget = budget.footage_budget(conn, specific)
+    assert specific_budget["total_usable_s"] == pytest.approx(10, abs=0.5)
+    assert all(a["species_match"] == "exact" for a in specific_budget["assets"])
+
+
+def test_ineligible_assets_excluded_with_reasons(conn, tmp_path):
+    topic = evidence.add_topic(conn, "Budget animal", "Species budget", "Tiny but Extraordinary")
+    approved_clip(conn, clip(tmp_path, "good.mp4", 16), "Budget animal")
+    unapproved = media.import_asset(conn, clip(tmp_path, "raw.mp4", 40),
+                                    source_ref="local:x", creator="T", license_type="original",
+                                    evidence="fixture", attribution="T", species="Budget animal",
+                                    commercial=True, modifications=True)
+    result = budget.footage_budget(conn, topic)
+    assert result["total_usable_s"] == pytest.approx(16, abs=0.5)
+    assert unapproved in {a["asset_id"] for a in result["excluded"]}
+    assert all(a["reasons"] for a in result["excluded"])
+
+
+def test_select_profile_bounds_and_needs_media(conn, tmp_path):
+    topic = evidence.add_topic(conn, "Budget animal", "Species budget", "Tiny but Extraordinary")
+    assert budget.select_profile({"total_usable_s": 10})["profile"] == "NEEDS_MEDIA"
+    assert budget.select_profile({"total_usable_s": 18})["profile"] == "MICRO"
+    assert budget.select_profile({"total_usable_s": 45})["profile"] == "STANDARD"
+    extended = budget.select_profile({"total_usable_s": 80})
+    assert extended["profile"] == "EXTENDED" and extended["target_s"] <= 70
+    assert all(sel["reason"] for sel in
+               (extended, budget.select_profile({"total_usable_s": 18})))
+
+
+def test_save_plan_rejects_reused_footage_over_usable_budget(conn, setup):
+    topic, fact, asset = setup
+    reused = {"topic_id": topic, "title": "Reuse", "hooks": ["a", "b", "c"],
+              "segments": [{"text": "2 ears.", "fact_ids": [fact], "asset_id": asset,
+                            "start_s": 0, "duration_s": 2},
+                           {"text": "2 ears.", "fact_ids": [fact], "asset_id": asset,
+                            "start_s": 0, "duration_s": 2.5}]}
+    with pytest.raises(ValueError, match="usable footage budget"):
+        creative.save_plan(conn, reused)
+
+
+def test_generate_plan_prompt_carries_duration_budget(conn, setup, monkeypatch):
+    topic, fact, asset = setup
+    captured = {}
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+        def read(self):
+            return json.dumps({"response": json.dumps(plan(topic, fact, asset))}).encode()
+    def fake_open(req, timeout):
+        captured["body"] = json.loads(req.data)
+        return Response()
+    monkeypatch.setattr(creative.urllib.request, "urlopen", fake_open)
+    creative.generate_plan(conn, topic)
+    prompt = json.loads(captured["body"]["prompt"])
+    footage = prompt["footage_budget"]
+    assert footage["profile"] == "NEEDS_MEDIA" or footage["target_s"] <= 3.1
+    assert footage["limits"]["max_total_s"] == pytest.approx(3, abs=0.3)
+    assert footage["assets"][0]["asset_id"] == asset
+
+
+def test_draft_ready_returns_needs_media_and_records_profile_reason(conn, tmp_path, monkeypatch):
+    tiny = evidence.add_topic(conn, "Tiny animal", "Species tiny", "Tiny but Extraordinary")
+    tiny_fact = evidence.add_fact(conn, tiny, "It is tiny.", "Org", "local:t",
+                                  "It is tiny.", "2026-01-01")
+    evidence.approve_fact(conn, tiny_fact)
+    approved_clip(conn, clip(tmp_path, "tiny.mp4", 10), "Tiny animal")
+    small = evidence.add_topic(conn, "Small animal", "Species small", "Tiny but Extraordinary")
+    small_fact = evidence.add_fact(conn, small, "It is small.", "Org", "local:s",
+                                   "It is small.", "2026-01-01")
+    evidence.approve_fact(conn, small_fact)
+    small_asset = approved_clip(conn, clip(tmp_path, "small.mp4", 18), "Small animal")
+    def stub(c, topic_id):
+        fact, asset = (small_fact, small_asset) if topic_id == small else (tiny_fact, None)
+        return {"topic_id": topic_id, "title": "T", "hooks": ["a", "b", "c"],
+                "segments": [{"text": "It is small.", "fact_ids": [fact],
+                              "asset_id": asset or "", "start_s": 0, "duration_s": 2}]}
+    monkeypatch.setattr(creative, "generate_plan", stub)
+    result = creative.draft_ready(conn, limit=5)
+    assert tiny in result["needs_media"] and "usable" in result["needs_media"][tiny]
+    assert result["drafted"]
+    stored = json.loads(conn.execute("SELECT content FROM plans WHERE topic_id=?",
+                                     (small,)).fetchone()[0])
+    assert stored["runtime_exception"] and "MICRO" in stored["runtime_exception"]
+    assert stored["footage_profile"]["profile"] == "MICRO"

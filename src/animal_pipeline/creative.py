@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+from .budget import footage_budget, select_profile, species_match
 from .core import canonical_hash, new_id, now, settings
 from .evidence import validate_segments
 from .media import rights_errors
@@ -34,12 +35,14 @@ def rank_topics(conn: sqlite3.Connection) -> list[dict]:
     for topic in conn.execute("SELECT * FROM topics"):
         facts = conn.execute("SELECT COUNT(*) FROM facts WHERE topic_id=? AND status='approved'",
                              (topic["id"],)).fetchone()[0]
-        assets = [a for a in conn.execute("SELECT * FROM assets WHERE species=?", (topic["species"],))
-                  if not rights_errors(a)]
+        assets = [a for a in conn.execute("SELECT * FROM assets")
+                  if species_match(topic["species"], a["species"]) and not rights_errors(a)]
         views_per_day = _topic_feedback(conn, topic["id"])
         boost = min(views_per_day / 50, 8) if views_per_day else 0.0
         score = min(facts, 5) * 2 + min(len(assets), 3) * 5 + boost
+        usable = sum(a["duration"] for a in assets)
         reasons = {"approved_facts": facts, "usable_visuals": len(assets),
+                   "usable_footage_s": round(usable, 1),
                    "analytics": ({"median_views_per_day": round(views_per_day, 2),
                                   "rank_boost": round(boost, 2)}
                                  if views_per_day is not None else "no observed performance"),
@@ -57,18 +60,23 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
         raise ValueError("unknown topic")
     facts = [dict(r) for r in conn.execute(
         "SELECT * FROM facts WHERE topic_id=? AND status='approved'", (topic_id,))]
-    assets = [dict(a) for a in conn.execute("SELECT * FROM assets WHERE species=?", (topic["species"],))
-              if not rights_errors(a)]
+    assets = [dict(a) for a in conn.execute("SELECT * FROM assets")
+              if species_match(topic["species"], a["species"]) and not rights_errors(a)]
     if not facts or not assets:
         raise ValueError("approved evidence and licensed, non-test footage are both required")
+    footage = footage_budget(conn, topic_id)
     config = settings()["llm"]
-    prompt = json.dumps({"instruction": "Write an original animal video narrative. Only use the supplied facts. "
-                         "Return JSON with keys hooks (three distinct strings), title, segments (list of objects "
+    prompt = json.dumps({"instruction": "Write an original animal video narrative for a vertical "
+                         "short. Only use the supplied facts and footage. Return JSON with keys "
+                         "hooks (three distinct strings), title, segments (list of objects "
                          "text, fact_ids, asset_id, start_s, duration_s), description. "
-                         "Each segment must reference a supporting fact and a matching clip; no invented claims.",
+                         "Each segment must reference a supporting fact and a matching clip; "
+                         "no invented claims. The sum of segment duration_s must not exceed "
+                         "footage_budget.limits.max_total_s, each shot must fit inside its "
+                         "asset's in_s..out_s window and stay under limits.max_shot_s, and the "
+                         "whole script must read within narration.estimated_max_words words.",
                          "topic": dict(topic), "facts": facts,
-                         "assets": [{k: a[k] for k in ("id", "species", "behavior", "duration")}
-                                    for a in assets]})
+                         "footage_budget": footage})
     req = urllib.request.Request(config["base_url"].rstrip("/") + "/api/generate",
                                  data=json.dumps({"model": config["model"], "prompt": prompt,
                                                   "stream": False, "format": "json",
@@ -94,14 +102,20 @@ def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False,
     topic = conn.execute("SELECT species FROM topics WHERE id=?", (topic_id,)).fetchone()
     if not topic:
         raise ValueError("unknown topic")
+    footage = footage_budget(conn, topic_id, simulation=simulation)
+    total_s = sum(float(s.get("duration_s", 0)) for s in segments)
+    if total_s > footage["limits"]["max_total_s"] + 0.05:
+        errors.append("plan exceeds usable footage budget")
     for segment in segments:
         asset = conn.execute("SELECT * FROM assets WHERE id=?", (segment.get("asset_id"),)).fetchone()
-        if not asset or asset["species"] != topic["species"]:
+        if not asset or not species_match(topic["species"], asset["species"]):
             errors.append("missing or wrong-species footage")
         elif rights_errors(asset, publishable=not simulation):
             errors.extend(rights_errors(asset, publishable=not simulation))
         if float(segment.get("start_s", -1)) < 0 or float(segment.get("duration_s", 0)) <= 0:
             errors.append("invalid shot timing")
+        elif float(segment["duration_s"]) > footage["limits"]["max_shot_s"] + 0.05:
+            errors.append("shot exceeds maximum shot length")
         elif asset and float(segment["start_s"]) + float(segment["duration_s"]) > asset["duration"] + 0.05:
             errors.append("shot exceeds source footage")
     if len(plan.get("hooks", [])) != 3 or not plan.get("title") or errors:
@@ -109,6 +123,10 @@ def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False,
     rev = conn.execute("SELECT COALESCE(MAX(revision),0)+1 FROM plans WHERE topic_id=?",
                        (topic_id,)).fetchone()[0]
     plan_id = new_id("plan")
+    plan = {**plan, "footage_profile": {"profile": footage["profile"],
+                                        "target_s": footage["target_s"],
+                                        "usable_s": footage["total_usable_s"],
+                                        "reason": footage["reason"]}}
     conn.execute("UPDATE plans SET status='CHANGES_REQUESTED',approved_hash=NULL "
                  "WHERE topic_id=? AND status IN ('READY_FOR_REVIEW','APPROVED','EXPORTED')", (topic_id,))
     conn.execute("INSERT INTO plans(id,topic_id,revision,content,hash,created_at) VALUES(?,?,?,?,?,?)",
@@ -127,7 +145,7 @@ OPEN_REVISIONS = ("SCRIPT_READY", "READY_FOR_REVIEW", "APPROVED", "EXPORTED")
 
 
 def draft_ready(conn: sqlite3.Connection, limit: int) -> dict:
-    drafted, errors = [], {}
+    drafted, errors, needs_media = [], {}, {}
     for topic in rank_topics(conn):
         if len(drafted) >= limit:
             break
@@ -138,11 +156,17 @@ def draft_ready(conn: sqlite3.Connection, limit: int) -> dict:
                         f"({','.join('?' * len(OPEN_REVISIONS))}) LIMIT 1",
                         (topic["id"], *OPEN_REVISIONS)).fetchone():
             continue
+        footage = footage_budget(conn, topic["id"])
+        if footage["needs_media"]:
+            needs_media[topic["id"]] = footage["reason"]
+            continue
         try:
-            drafted.append(save_plan(conn, generate_plan(conn, topic["id"])))
+            drafted.append(save_plan(conn, generate_plan(conn, topic["id"]),
+                                     footage_first=footage["profile"] != "EXTENDED",
+                                     reason=footage["reason"]))
         except (OSError, urllib.error.URLError) as exc:
             errors["llm"] = f"planner unavailable: {exc}"
             break
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             errors[topic["id"]] = str(exc)[:200]
-    return {"drafted": drafted, "errors": errors}
+    return {"drafted": drafted, "errors": errors, "needs_media": needs_media}

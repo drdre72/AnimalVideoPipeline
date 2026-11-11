@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .audio import align, synthesize, write_srt
+from .budget import species_match
 from .core import ROOT, digest, settings
 from .evidence import validate_segments
 from .media import probe, rights_errors
@@ -68,7 +69,7 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
     topic = conn.execute("SELECT * FROM topics WHERE id=?", (row["topic_id"],)).fetchone()
     for shot in plan["segments"]:
         asset = conn.execute("SELECT * FROM assets WHERE id=?", (shot["asset_id"],)).fetchone()
-        if not asset or asset["species"] != topic["species"]:
+        if not asset or not species_match(topic["species"], asset["species"]):
             errors.append("missing or wrong-species asset")
             continue
         errors.extend(rights_errors(asset, publishable=not simulation))
@@ -82,7 +83,8 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         clips.append(asset)
     cfg = settings()["render"]
     duration = sum(float(s["duration_s"]) for s in plan["segments"])
-    min_duration = 20 if plan.get("runtime_exception") else cfg["min_duration_s"]
+    min_duration = (cfg["exception_min_duration_s"] if plan.get("runtime_exception")
+                    else cfg["min_duration_s"])
     if not simulation and not min_duration <= duration <= cfg["max_duration_s"]:
         errors.append("duration outside approved production range")
     if errors:

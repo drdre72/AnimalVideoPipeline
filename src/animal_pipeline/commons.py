@@ -18,11 +18,23 @@ API = "https://commons.wikimedia.org/w/api.php"
 MAX_METADATA_BYTES = 1_000_000
 MAX_MEDIA_BYTES = 200_000_000
 LICENSES = {
-    "CC BY 2.0": "https://creativecommons.org/licenses/by/2.0",
-    "CC BY 3.0": "https://creativecommons.org/licenses/by/3.0",
-    "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0",
-    "CC0 1.0": "https://creativecommons.org/publicdomain/zero/1.0",
+    "CC BY 2.0": "/licenses/by/2.0",
+    "CC BY 3.0": "/licenses/by/3.0",
+    "CC BY 4.0": "/licenses/by/4.0",
+    "CC0": "/publicdomain/zero/1.0",
+    "CC0 1.0": "/publicdomain/zero/1.0",
 }
+LICENSE_HOST = "creativecommons.org"
+LICENSE_SUFFIXES = re.compile(r"/(?:deed\.[a-zA-Z.]+|legalcode(?:\.[a-zA-Z]+)?)$")
+
+
+def _license_url_ok(name: str, url: str) -> bool:
+    canonical = LICENSES.get(name)
+    parsed = urllib.parse.urlsplit(url.rstrip("/"))
+    if not canonical or parsed.hostname != LICENSE_HOST or not parsed.path:
+        return False
+    path = LICENSE_SUFFIXES.sub("", parsed.path.rstrip("/"))
+    return path == canonical
 MEDIA_HOST = "upload.wikimedia.org"
 API_HOST = "commons.wikimedia.org"
 
@@ -80,7 +92,7 @@ def _details(title: str) -> dict:
     metadata = image.get("extmetadata", {})
     license_name = _plain(metadata.get("LicenseShortName", {}).get("value", ""))
     license_url = _plain(metadata.get("LicenseUrl", {}).get("value", "")).rstrip("/")
-    if license_name not in LICENSES or license_url != LICENSES[license_name]:
+    if not _license_url_ok(license_name, license_url):
         raise ValueError("unknown or restricted Commons license")
     if _plain(metadata.get("Restrictions", {}).get("value", "")):
         raise ValueError("Commons license has item-specific restrictions")
