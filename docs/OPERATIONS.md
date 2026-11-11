@@ -3,7 +3,7 @@
 Run `uv sync --no-editable --extra dev`, then
 `uv run --no-editable python main.py doctor`. FFmpeg and FFprobe are required.
 For production voice, install `uv sync --no-editable --extra tts`,
-choose and approve a voice in `config/settings.yaml`, run Ollama locally
+use the approved `af_bella` voice in `config/settings.yaml`, run Ollama locally
 with an installed Qwen-class model and configure a local whisper.cpp model.
 The strict render path fails rather than substitute another voice or estimated
 caption timing. Production assets and evidence must be supplied by an operator.

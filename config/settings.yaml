@@ -26,9 +26,9 @@ render:
   max_duration_s: 70
 voice:
   backend: kokoro_mlx
-  model: mlx-community/Kokoro-82M-v1.0-4bit
-  approved: false
-  name: ""
+  model: mlx-community/Kokoro-82M-bf16
+  approved: true
+  name: af_bella
   strict: true
 alignment:
   model_path: models/ggml-base.en.bin
