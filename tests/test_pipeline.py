@@ -548,6 +548,28 @@ def test_real_mp4_probe_and_synthetic_review_block(footage, tmp_path, monkeypatc
     db.close()
 
 
+def test_voice_identity_change_flags_but_new_keys_do_not(conn, setup, monkeypatch):
+    from animal_pipeline.core import settings as live_settings
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    voice = live_settings()["voice"]
+    asset_path = conn.execute("SELECT path FROM assets WHERE id=?", (asset,)).fetchone()[0]
+    asset_hash = conn.execute("SELECT sha256 FROM assets WHERE id=?", (asset,)).fetchone()[0]
+    qc = json.dumps({"ok": True, "voice": {"backend": voice["backend"],
+                                           "name": voice["name"], "model": voice["model"]}})
+    conn.execute("UPDATE plans SET status='READY_FOR_REVIEW',qc=?,video_path=?,video_hash=? "
+                 "WHERE id=?", (qc, asset_path, asset_hash, identifier))
+    errors = review.review_errors(
+        conn, conn.execute("SELECT * FROM plans WHERE id=?", (identifier,)).fetchone())
+    assert "approved voice configuration changed" not in errors
+    bad_qc = json.dumps({"ok": True, "voice": {"backend": voice["backend"],
+                                               "name": "af_sky", "model": voice["model"]}})
+    conn.execute("UPDATE plans SET qc=? WHERE id=?", (bad_qc, identifier))
+    errors = review.review_errors(
+        conn, conn.execute("SELECT * FROM plans WHERE id=?", (identifier,)).fetchone())
+    assert "approved voice configuration changed" in errors
+
+
 def test_review_ui_escapes_and_shows_gates(conn, setup):
     topic, fact, asset = setup
     identifier = creative.save_plan(conn, plan(topic, fact, asset, "It has <b>2</b> ears."))
@@ -570,6 +592,38 @@ def test_launchd_plist_is_deterministic_and_bounded(tmp_path):
     assert (tmp_path / "agents" / "ai.naminal.desk.plist").is_file()
     assert (tmp_path / "output" / "logs").is_dir()
     assert written["bootstrapped"] is False
+
+
+def test_review_page_prefills_commands_only_when_unblocked(conn, setup, monkeypatch):
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    page = server.review_page(conn, identifier)
+    assert "python main.py approve" not in page
+    monkeypatch.setattr(server, "review_errors", lambda c, r: [])
+    conn.execute("UPDATE plans SET status='READY_FOR_REVIEW',video_hash='abc123' WHERE id=?",
+                 (identifier,))
+    page = server.review_page(conn, identifier)
+    assert f"python main.py approve {identifier} abc123" in page
+    assert "--verify-facts --verify-visuals --verify-rights --verify-audio" in page
+    conn.execute("UPDATE plans SET status='APPROVED' WHERE id=?", (identifier,))
+    page = server.review_page(conn, identifier)
+    assert "--platform youtube" in page and "--platform instagram" in page
+
+
+def test_triage_page_lists_pending_verification_commands(conn, setup):
+    topic, fact, asset = setup
+    pending_fact = evidence.add_fact(conn, topic, "Pending claim.", "Org", "local:x",
+                                     "Pending claim.", "2026-01-02")
+    pending_asset = media.import_asset(conn, Path(conn.execute(
+        "SELECT path FROM assets WHERE id=?", (asset,)).fetchone()[0]),
+        source_ref="local:unverified", creator="T", license_type="original",
+        evidence="fixture", attribution="T", species="Fixture animal",
+        commercial=True, modifications=True)
+    page = server.triage_page(conn)
+    assert f"verify-fact {pending_fact}" in page
+    assert f"verify-rights {pending_asset}" in page
+    assert "Pending claim." in page
+    assert fact not in page  # approved facts need no action
 
 
 def test_review_ui_serves_over_http(conn, setup, tmp_path):

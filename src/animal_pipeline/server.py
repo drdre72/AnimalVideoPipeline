@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .core import ROOT, connect
-from .review import review_errors
+from .review import PLATFORMS, review_errors
 
 
 def _esc(value: object) -> str:
@@ -25,8 +25,18 @@ td,th{{padding:.4rem;border-bottom:1px solid #333;text-align:left;font-size:.9re
 a{{color:#8ec7ff}}video{{width:100%;max-width:360px;border-radius:8px}}
 pre{{background:#000;padding:.7rem;overflow:auto;font-size:.75rem}}
 .badge{{padding:.15rem .5rem;border-radius:4px;background:#333;font-size:.75rem}}
-.block{{color:#ff9c9c}}</style></head><body><h1>Naminal Hub</h1>{body}
-<p><a href="/">← Review queue</a></p></body></html>"""
+.block{{color:#ff9c9c}}.cmd{{position:relative;padding-right:4.5rem}}
+.copy{{position:absolute;top:.5rem;right:.5rem;background:#333;border:0;color:#8ec7ff;
+padding:.2rem .6rem;border-radius:4px;cursor:pointer;font-size:.75rem}}</style>
+<script>function copycmd(b){{navigator.clipboard.writeText(
+b.parentElement.innerText.replace('copy','').trim())}}</script>
+</head><body><h1>Naminal Hub</h1>{body}
+<p><a href="/">← Review queue</a> · <a href="/triage">Triage</a></p></body></html>"""
+
+
+def _cmd_block(commands: list[str]) -> str:
+    return ("<pre class='cmd'><button class='copy' onclick='copycmd(this)'>copy</button>"
+            + _esc("\n".join(commands)) + "</pre>")
 
 
 def queue_page(conn: sqlite3.Connection) -> str:
@@ -37,11 +47,13 @@ def queue_page(conn: sqlite3.Connection) -> str:
         f"<tr><td><a href='/review/{_esc(r['id'])}'>{_esc(r['species'])}</a></td>"
         f"<td>r{_esc(r['revision'])}</td><td><span class='badge'>{_esc(r['status'])}</span></td>"
         f"<td>{_esc(r['created_at'][:19])}</td></tr>" for r in rows)
+    pending = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM facts WHERE status='proposed') + "
+        "(SELECT COUNT(*) FROM assets WHERE approved=0)").fetchone()[0]
     body = ("<h2>Review queue</h2><table><tr><th>Subject</th><th>Rev</th>"
             "<th>Status</th><th>Created (UTC)</th></tr>" + lines + "</table>"
-            "<p>Approvals are deliberately CLI-only: <code>python main.py approve "
-            "PLAN_ID SHA256 --verify-facts --verify-visuals --verify-rights "
-            "--verify-audio</code></p>")
+            f"<p><a href='/triage'>{pending} item(s) awaiting verification</a> — "
+            "approval and export commands are prefilled on each revision page.</p>")
     return _page("Queue", body)
 
 
@@ -60,13 +72,53 @@ def review_page(conn: sqlite3.Connection, plan_id: str) -> str:
     errors = "".join(f"<li class='block'>{_esc(e)}</li>" for e in blocking)
     script = "".join(f"<li>{_esc(s['text'])} <em>({_esc(s['duration_s'])}s)</em></li>"
                      for s in plan.get("segments", []))
+    action = ""
+    if not blocking and row["status"] == "READY_FOR_REVIEW":
+        action = ("<h3>Approve this exact revision</h3>" + _cmd_block([
+            f"python main.py approve {row['id']} {row['video_hash']} "
+            "--verify-facts --verify-visuals --verify-rights --verify-audio"]))
+    elif not blocking and row["status"] == "APPROVED":
+        action = ("<h3>Local export packages</h3>" + _cmd_block([
+            f"python main.py export {row['id']} --platform {platform}"
+            for platform in PLATFORMS]))
     body = (f"<h2>{_esc(plan.get('title', row['species']))}</h2>"
             f"<p><span class='badge'>{_esc(row['status'])}</span> "
             f"rev {_esc(row['revision'])} · <code>{_esc(row['video_hash'] or 'no video')}</code></p>"
-            f"{video}<h3>Blocking checks</h3><ul>{errors or '<li>none</li>'}</ul>"
+            f"{video}<h3>Blocking checks</h3><ul>{errors or '<li>none</li>'}</ul>{action}"
             f"<h3>Script</h3><ul>{script}</ul><h3>Description</h3>"
             f"<p>{_esc(plan.get('description', ''))}</p><h3>Manifest</h3><pre>{_esc(manifest)}</pre>")
     return _page(row["species"], body)
+
+
+def triage_page(conn: sqlite3.Connection) -> str:
+    facts = conn.execute(
+        "SELECT f.id,f.statement,f.excerpt,f.organization,f.source_ref,t.species "
+        "FROM facts f JOIN topics t ON t.id=f.topic_id "
+        "WHERE f.status='proposed' ORDER BY f.created_at").fetchall()
+    assets = conn.execute(
+        "SELECT id,species,creator,license_type,source_ref,duration FROM assets "
+        "WHERE approved=0 ORDER BY created_at").fetchall()
+    fact_rows = "".join(
+        f"<tr><td>{_esc(f['species'])}</td><td>{_esc(f['statement'])}</td>"
+        f"<td>{_esc(f['organization'])}</td></tr>"
+        f"<tr><td colspan='3'><small>{_esc(f['excerpt'][:220])} — "
+        f"<a href='{_esc(f['source_ref'])}'>{_esc(f['source_ref'][:80])}</a></small></td></tr>"
+        for f in facts)
+    asset_rows = "".join(
+        f"<tr><td>{_esc(a['species'])}</td><td>{_esc(a['creator'])}</td>"
+        f"<td>{_esc(a['license_type'])}</td><td>{_esc(round(a['duration'], 1))}s</td></tr>"
+        f"<tr><td colspan='4'><small><a href='{_esc(a['source_ref'])}'>"
+        f"{_esc(a['source_ref'][:100])}</a></small></td></tr>" for a in assets)
+    commands = ([f"python main.py verify-fact {f['id']}" for f in facts] +
+                [f"python main.py verify-rights {a['id']}" for a in assets])
+    bulk = ("<h3>Verify everything listed</h3>" + _cmd_block(commands)
+            if commands else "<p>Nothing awaiting verification.</p>")
+    body = (f"<h2>Triage — verify before approval</h2>"
+            f"<h3>Proposed facts ({len(facts)})</h3><table>{fact_rows or '<tr><td>none</td></tr>'}</table>"
+            f"<h3>Unverified assets ({len(assets)})</h3><table>{asset_rows or '<tr><td>none</td></tr>'}</table>"
+            f"{bulk}<p>Read each excerpt and source before running its command — "
+            "verification is an operator assertion, not a formality.</p>")
+    return _page("Triage", body)
 
 
 def make_handler(db_path: Path | None):
@@ -97,6 +149,8 @@ def make_handler(db_path: Path | None):
                 path = urlparse(self.path).path
                 if path == "/":
                     return self._send(200, queue_page(conn).encode())
+                if path == "/triage":
+                    return self._send(200, triage_page(conn).encode())
                 if path.startswith("/review/"):
                     target = path[len("/review/"):].split("/")[0]
                     return self._send(200, review_page(conn, target).encode())

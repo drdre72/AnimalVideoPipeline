@@ -83,6 +83,9 @@ been validated in this project. Disk availability and current hardware
 status appear in `doctor`.
 
 `serve --port 8787` runs a read-only local review UI on 127.0.0.1: the
-queue, per-revision video, blocking checks, script and manifest. It opens
-a fresh SQLite connection per request and cannot approve anything —
-approval stays on the CLI with an exact SHA-256 and all four attestations.
+queue, per-revision video, blocking checks, script and manifest, plus a
+`/triage` page listing proposed facts and unverified assets with their
+`verify-fact`/`verify-rights` commands ready to paste. Unblocked revisions
+show the prefilled `approve` command (exact SHA-256, all four attestations)
+and approved ones the three `export` commands; nothing mutates over HTTP —
+a fresh SQLite connection per request serves GETs only.

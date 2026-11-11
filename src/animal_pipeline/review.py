@@ -37,8 +37,12 @@ def review_errors(conn: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
             errors.append("video is corrupt")
     if not row["qc"] or not json.loads(row["qc"]).get("ok"):
         errors.append("mandatory QC did not pass")
-    elif json.loads(row["qc"]).get("voice") != settings()["voice"]:
-        errors.append("approved voice configuration changed")
+    else:
+        rendered_voice = json.loads(row["qc"]).get("voice") or {}
+        current = settings()["voice"]
+        if any(rendered_voice.get(key) != current.get(key)
+               for key in ("backend", "name", "model")):
+            errors.append("approved voice configuration changed")
     for shot in plan["segments"]:
         asset = conn.execute("SELECT * FROM assets WHERE id=?", (shot["asset_id"],)).fetchone()
         if not asset:
