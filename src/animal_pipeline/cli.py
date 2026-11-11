@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import analytics, competitors, creative, editor, evidence, media, review, scheduler
+from . import analytics, commons, competitors, creative, editor, evidence, media, review, scheduler
 from .core import ROOT, connect, settings
 
 
@@ -40,6 +40,13 @@ def parser() -> argparse.ArgumentParser:
     asset.add_argument("--test-only", action="store_true")
     assets = sub.add_parser("assets", help="List cataloged footage and rights status")
     assets.add_argument("--all", action="store_true")
+    commons_search = sub.add_parser("commons-search", help="Search Commons video titles via the official API")
+    commons_search.add_argument("query")
+    commons_search.add_argument("--allow-network", action="store_true")
+    commons_import = sub.add_parser("commons-import", help="Download one Commons file into unapproved catalog")
+    commons_import.add_argument("title")
+    commons_import.add_argument("--species", required=True)
+    commons_import.add_argument("--allow-network", action="store_true")
     inspect = sub.add_parser("inspect-asset", help="Generate clip contact sheet and vertical preview")
     inspect.add_argument("asset_id")
     rights = sub.add_parser("verify-rights", help="Operator confirms rights evidence")
@@ -125,6 +132,14 @@ def dispatch(args: argparse.Namespace) -> object:
                                       expires_at=args.expires_at, test_only=args.test_only)
         if args.command == "assets":
             return [dict(a) for a in conn.execute("SELECT * FROM assets")]
+        if args.command in ("commons-search", "commons-import"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for Commons access")
+            if args.command == "commons-search":
+                return commons.search(args.query)
+            return {"asset_id": commons.import_video(conn, args.title, args.species,
+                                                       ROOT / "cache" / "commons"),
+                    "approved": False, "requires_operator_rights_review": True}
         if args.command == "inspect-asset":
             return media.inspect_asset(conn, args.asset_id, ROOT / "cache" / "media")
         if args.command == "verify-rights":

@@ -3,10 +3,11 @@
 Untrusted scientific excerpts, model text, metadata and media paths can
 inject instructions or malformed input. Treat all as data. Never run
 generated shell commands; FFmpeg uses bounded argv calls. Only local files
-with recorded hashes enter renders. No crawler or downloader is needed for
-the initial rights workflow. HTTPS and strict host/byte limits are required
-before adding any remote importer. Never log OAuth credentials or private
-configuration; keep them out of this repository.
+with recorded hashes enter renders. The opt-in Commons importer pins the
+official API and upload hosts (including redirects), verifies HTTPS and
+applies separate metadata and video byte ceilings. It rejects unrecognized
+or restricted licenses and leaves imported assets unapproved. Never log
+OAuth credentials or private configuration; keep them out of this repository.
 
 Threats: unsupported science, fraudulent/expired licenses, species mismatch,
 misleading cropping, synthetic wildlife misrepresented as real, stale
