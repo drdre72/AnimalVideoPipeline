@@ -494,6 +494,20 @@ def test_whisper_caption_times_are_clamped_to_audio(tmp_path, monkeypatch):
     assert all(len(c["text"]) <= 42 for c in captions)
 
 
+def test_plan_min_duration_honors_recorded_profiles():
+    cfg = {"min_duration_s": 61, "exception_min_duration_s": 15}
+    micro = {"footage_profile": {"profile": "MICRO"}}
+    standard = {"footage_profile": {"profile": "STANDARD"}}
+    extended = {"footage_profile": {"profile": "EXTENDED"}}
+    assert editor.plan_min_duration(micro, cfg) == 15
+    assert editor.plan_min_duration(standard, cfg) == 30.0
+    assert editor.plan_min_duration(extended, cfg) == 61
+    assert editor.plan_min_duration({"runtime_exception": "x"}, cfg) == 15
+    assert editor.plan_min_duration({"runtime_exception": "x",
+                                     "footage_profile": {"profile": "EXTENDED"}}, cfg) == 15
+    assert editor.plan_min_duration({}, cfg) == 61
+
+
 def test_excessive_tail_silence_fails_audio_gate():
     assert not editor.audio_timing_ok(46, 37.875)
     assert editor.audio_timing_ok(40, 37.875)

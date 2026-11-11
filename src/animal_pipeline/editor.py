@@ -35,6 +35,23 @@ def _encoder() -> str:
     return encoder
 
 
+def plan_min_duration(plan: dict, cfg: dict) -> float:
+    """Lower render bound for a validated plan.
+
+    save_plan already enforced the footage budget and recorded the selected
+    profile inside the immutable plan, so a recorded MICRO/STANDARD profile
+    is a legitimate duration exception — not an operator override.
+    """
+    if plan.get("runtime_exception"):
+        return float(cfg["exception_min_duration_s"])
+    profile = (plan.get("footage_profile") or {}).get("profile")
+    if profile == "MICRO":
+        return float(cfg["exception_min_duration_s"])
+    if profile == "STANDARD":
+        return 30.0
+    return float(cfg["min_duration_s"])
+
+
 def audio_timing_ok(video_duration: float, audio_duration: float) -> bool:
     return video_duration > 0 and 0.92 * video_duration <= audio_duration <= video_duration + 0.2
 
@@ -88,8 +105,7 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         clips.append(asset)
     cfg = settings()["render"]
     duration = sum(float(s["duration_s"]) for s in plan["segments"])
-    min_duration = (cfg["exception_min_duration_s"] if plan.get("runtime_exception")
-                    else cfg["min_duration_s"])
+    min_duration = plan_min_duration(plan, cfg)
     if not simulation and not min_duration <= duration <= cfg["max_duration_s"]:
         errors.append("duration outside approved production range")
     if errors:

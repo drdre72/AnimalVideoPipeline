@@ -54,5 +54,11 @@ Tested scope: 87 tests, all offline-safe (Google APIs mocked); see TESTING.md.
   `youtube authorize` is run interactively.
 - **`uv sync` wheel staleness**: new modules may need a package reinstall
   before `main.py` sees them.
+- **iCloud Drive sync**: the repo lives under `~/Documents`, which iCloud
+  syncs; a mass package install produced ~21,500 hidden "name 2" conflict
+  duplicates inside `.venv`, turning a transformers import into a 4-minute
+  stall (fixed once: `find .venv -name '* 2.*' -delete`). If it recurs,
+  either keep removing them, move `.venv` outside the synced tree, or
+  exclude the folder in System Settings → iCloud.
 - **16 GB RAM**: one heavy job at a time is enforced; sustained daily
   throughput is bounded by render time, not scheduler capacity.
