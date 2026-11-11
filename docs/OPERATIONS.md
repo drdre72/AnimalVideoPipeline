@@ -21,6 +21,12 @@ rights and sound, then pass all four `--verify-*` attestations with the exact
 SHA-256 shown by `review`. This is an operator assertion, not a substitute for
 independent evidence.
 
+Some Wikimedia Commons OGV files use Theora/Vorbis and may appear black or
+fail to play in macOS QuickTime. `inspect-asset <asset_id>` writes a separate
+H.264/AAC `playable_preview` MP4 in `cache/media/` for review, alongside its
+contact sheet and vertical still. The rights-bound original remains intact;
+the preview does not approve the asset or authorize distribution.
+
 Current limits: operator-assisted topic entry and evidence approval, no remote
 research/discovery or footage download, no resident TTS worker, no local
 preview UI or launchd installation, no automatic publication, and no

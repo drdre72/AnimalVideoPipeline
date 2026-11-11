@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -84,6 +85,34 @@ def approve_asset(conn: sqlite3.Connection, asset_id: str) -> None:
     conn.execute("UPDATE assets SET approved=1 WHERE id=?", (asset_id,))
 
 
+def playable_preview(asset: sqlite3.Row, cache: Path) -> Path:
+    out = cache / f"{asset['id']}_playable.mp4"
+    if out.is_file():
+        try:
+            if probe(out)["codec"] == "h264":
+                return out
+        except ValueError:
+            pass
+    tmp = cache / f"{asset['id']}_playable.part.mp4"
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                              capture_output=True, text=True, timeout=30)
+    encoder = "h264_videotoolbox" if "h264_videotoolbox" in encoders.stdout else "libx264"
+    args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", asset["path"],
+            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", encoder, "-pix_fmt", "yuv420p",
+            "-b:v", "4M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            raise ValueError(f"preview encode failed: {result.stderr[-500:]}")
+        info = probe(tmp)
+        if info["codec"] != "h264" or abs(info["duration"] - asset["duration"]) > 0.5:
+            raise ValueError("preview codec or duration verification failed")
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
 def inspect_asset(conn: sqlite3.Connection, asset_id: str, cache: Path) -> dict:
     asset = conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
     if not asset:
@@ -94,18 +123,19 @@ def inspect_asset(conn: sqlite3.Connection, asset_id: str, cache: Path) -> dict:
     sheet = cache / f"{asset_id}.jpg"
     frame = cache / f"{asset_id}_vertical.jpg"
     duration = min(asset["duration"], 45)
+    contact_filter = "fps=1/5,scale=180:-1,tile=3x3" if duration >= 40 else "scale=180:-1"
     contact = subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
          "-i", asset["path"], "-t", str(duration),
-         "-vf", "fps=1/5,scale=180:-1,tile=3x3", "-frames:v", "1", str(sheet)],
+         "-vf", contact_filter, "-frames:v", "1", str(sheet)],
         capture_output=True, text=True, timeout=120)
     thumb = subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-ss", str(min(1, duration / 2)), "-i", asset["path"],
+         "-i", asset["path"], "-ss", str(min(1, duration / 2)),
          "-vf", "scale=270:480:force_original_aspect_ratio=increase,crop=270:480",
          "-frames:v", "1", str(frame)], capture_output=True, text=True, timeout=60)
     if contact.returncode or thumb.returncode:
-        raise ValueError("could not inspect footage")
+        raise ValueError(f"could not inspect footage: {(contact.stderr or thumb.stderr)[-500:]}")
     with Image.open(frame) as image:
         pixels = image.convert("L").resize((8, 8)).tobytes()
     mean = sum(pixels) / len(pixels)
@@ -119,6 +149,7 @@ def inspect_asset(conn: sqlite3.Connection, asset_id: str, cache: Path) -> dict:
     duplicates = [a["id"] for a in conn.execute(
         "SELECT id FROM assets WHERE sha256=? AND id!=?", (asset["sha256"], asset_id))]
     return {"contact_sheet": str(sheet), "vertical_preview": str(frame),
+            "playable_preview": str(playable_preview(asset, cache)),
             "visual_fingerprint": fingerprint, "scene_boundaries_s": boundaries,
             "exact_duplicates": duplicates, "species_tag": asset["species"],
             "species_tag_confidence": "operator supplied; not machine verified"}

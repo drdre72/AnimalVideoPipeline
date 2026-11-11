@@ -191,7 +191,27 @@ def test_inspect_asset_creates_real_visual_previews(conn, setup, tmp_path):
     _, _, asset = setup
     result = media.inspect_asset(conn, asset, tmp_path / "previews")
     assert Path(result["vertical_preview"]).is_file()
+    assert media.probe(Path(result["playable_preview"]))["codec"] == "h264"
     assert len(result["visual_fingerprint"]) == 64
+
+
+def test_theora_with_audio_gets_playable_preview(conn, tmp_path):
+    source = tmp_path / "theora.ogv"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-c:v", "libtheora", "-c:a", "libvorbis", str(source)],
+                   check=True, timeout=60)
+    asset = media.import_asset(conn, source, source_ref="local:fixture",
+                               creator="Test", license_type="original",
+                               evidence="generated in test", attribution="",
+                               species="Synthetic pattern", commercial=True, modifications=True)
+    preview = Path(media.inspect_asset(conn, asset, tmp_path / "previews")["playable_preview"])
+    streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                              "stream=codec_name", "-of", "json", str(preview)],
+                             capture_output=True, text=True, check=True).stdout
+    assert {stream["codec_name"] for stream in json.loads(streams)["streams"]} == {"h264", "aac"}
+    assert media.probe(source)["codec"] == "theora"
 
 
 def test_job_retry_bounded(conn, setup):
