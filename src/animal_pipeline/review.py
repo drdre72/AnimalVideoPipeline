@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 from .core import ROOT, digest, settings
@@ -82,6 +84,7 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
                "revision": row["revision"], "sha256": row["video_hash"],
                "title": plan["title"], "description": plan.get("description", ""),
                "hashtags": plan.get("hashtags", []),
+               "thumbnail": "thumbnail.jpg",
                "attribution": sorted({a["attribution"] for a in assets if a["attribution"]}),
                "disclosure_checklist": ["Confirm species, rights and facts",
                                         "Review synthetic-media disclosures",
@@ -90,9 +93,27 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
         return package
     dest = ROOT / "output" / "exports" / plan_id / platform
     dest.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(row["video_path"], dest / "Naminal_Hub.mp4")
-    (dest / "package.json").write_text(json.dumps(package, indent=2))
-    if digest(dest / "Naminal_Hub.mp4") != row["video_hash"]:
-        raise RuntimeError("export copy hash mismatch")
+    video_tmp = dest / "Naminal_Hub.part.mp4"
+    image_tmp = dest / "thumbnail.part.jpg"
+    json_tmp = dest / "package.part.json"
+    try:
+        shutil.copyfile(row["video_path"], video_tmp)
+        if digest(video_tmp) != row["video_hash"]:
+            raise RuntimeError("export copy hash mismatch")
+        thumbnail_time = min(3, probe(video_tmp)["duration"] / 2)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-ss", str(thumbnail_time), "-i", str(video_tmp),
+             "-frames:v", "1", str(image_tmp)],
+            capture_output=True, text=True, timeout=120)
+        if result.returncode or not image_tmp.is_file():
+            raise RuntimeError("could not create export thumbnail")
+        json_tmp.write_text(json.dumps(package, indent=2))
+        os.replace(video_tmp, dest / "Naminal_Hub.mp4")
+        os.replace(image_tmp, dest / "thumbnail.jpg")
+        os.replace(json_tmp, dest / "package.json")
+    finally:
+        for temporary in (video_tmp, image_tmp, json_tmp):
+            temporary.unlink(missing_ok=True)
     conn.execute("UPDATE plans SET status='EXPORTED' WHERE id=?", (plan_id,))
     return {"directory": str(dest), **package}

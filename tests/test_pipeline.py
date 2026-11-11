@@ -104,6 +104,22 @@ def test_no_approval_without_qc_and_no_unauthorized_export(conn, setup):
         review.export(conn, identifier, "youtube", dry_run=True)
 
 
+def test_local_export_includes_thumbnail_and_exact_revision(conn, setup, tmp_path, monkeypatch):
+    from animal_pipeline.core import digest
+    topic, fact, asset = setup
+    identifier = creative.save_plan(conn, plan(topic, fact, asset))
+    video = Path(conn.execute("SELECT path FROM assets WHERE id=?", (asset,)).fetchone()[0])
+    video_hash = digest(video)
+    conn.execute("UPDATE plans SET status='APPROVED',video_path=?,video_hash=?,approved_hash=? "
+                 "WHERE id=?", (str(video), video_hash, video_hash, identifier))
+    monkeypatch.setattr(review, "ROOT", tmp_path)
+    monkeypatch.setattr(review, "review_errors", lambda connection, row: [])
+    result = review.export(conn, identifier, "youtube")
+    folder = Path(result["directory"])
+    assert (folder / "thumbnail.jpg").is_file()
+    assert digest(folder / "Naminal_Hub.mp4") == video_hash
+
+
 def test_queue_recovery_and_idempotence(conn, setup):
     topic, fact, asset = setup
     identifier = creative.save_plan(conn, plan(topic, fact, asset))
