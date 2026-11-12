@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import platform
+import shutil
+import sqlite3
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import analytics, commons, competitors, creative, editor, evidence, google_auth, media, research, review, scheduler, server, service, sources, youtube
+from .core import ROOT, connect, settings
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="naminal", description="Naminal Hub local animal video desk")
+    sub = p.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor", help="Check local Mac, FFmpeg and model readiness")
+    sub.add_parser("status", help="Read local database summary")
+    topic = sub.add_parser("topic", help="Add a proposed animal subject")
+    topic.add_argument("species")
+    topic.add_argument("scientific_name")
+    topic.add_argument("pillar")
+    sub.add_parser("topics", help="Rank subjects by verified facts and usable footage")
+    fact = sub.add_parser("fact", help="Import one manually researched fact")
+    for name in ("topic_id", "statement", "organization", "source_ref", "excerpt", "retrieved_at"):
+        fact.add_argument(name)
+    fact.add_argument("--supersedes")
+    approve_fact = sub.add_parser("verify-fact", help="Operator verifies exact source excerpt")
+    approve_fact.add_argument("fact_id")
+    asset = sub.add_parser("asset", help="Catalog one local licensed footage file")
+    for name in ("path", "source_ref", "creator", "license_type", "evidence", "species"):
+        asset.add_argument(name)
+    asset.add_argument("--attribution", default="")
+    asset.add_argument("--behavior", default="")
+    asset.add_argument("--expires-at")
+    asset.add_argument("--commercial", action="store_true")
+    asset.add_argument("--modifications", action="store_true")
+    asset.add_argument("--test-only", action="store_true")
+    assets = sub.add_parser("assets", help="List cataloged footage and rights status")
+    assets.add_argument("--all", action="store_true")
+    commons_search = sub.add_parser("commons-search", help="Search Commons video titles via the official API")
+    commons_search.add_argument("query")
+    commons_search.add_argument("--allow-network", action="store_true")
+    commons_import = sub.add_parser("commons-import", help="Download one Commons file into unapproved catalog")
+    commons_import.add_argument("title")
+    commons_import.add_argument("--species", required=True)
+    commons_import.add_argument("--allow-network", action="store_true")
+    source_names = sorted(sources.SOURCES)
+    src_search = sub.add_parser("source-search", help="Search an external footage source API")
+    src_search.add_argument("source", choices=source_names)
+    src_search.add_argument("query")
+    src_search.add_argument("--allow-network", action="store_true")
+    src_list = sub.add_parser("source-list", help="List video links on a gallery category page")
+    src_list.add_argument("source", choices=source_names)
+    src_list.add_argument("url")
+    src_list.add_argument("--allow-network", action="store_true")
+    src_import = sub.add_parser("source-import", help="Download one source video into unapproved catalog")
+    src_import.add_argument("source", choices=source_names)
+    src_import.add_argument("ref", help="video page URL or API item id")
+    src_import.add_argument("--species", required=True)
+    src_import.add_argument("--allow-network", action="store_true")
+    research_search = sub.add_parser("research-search",
+                                     help="Search Wikipedia article titles via the official API")
+    research_search.add_argument("query")
+    research_search.add_argument("--allow-network", action="store_true")
+    research_propose = sub.add_parser("research-propose",
+                                      help="Propose verbatim Wikipedia sentence facts for a topic")
+    research_propose.add_argument("topic_id")
+    research_propose.add_argument("title")
+    research_propose.add_argument("--allow-network", action="store_true")
+    reject = sub.add_parser("reject-fact", help="Reject a proposed fact during triage")
+    reject.add_argument("fact_id")
+    inspect = sub.add_parser("inspect-asset", help="Generate clip contact sheet and vertical preview")
+    inspect.add_argument("asset_id")
+    rights = sub.add_parser("verify-rights", help="Operator confirms rights evidence")
+    rights.add_argument("asset_id")
+    plan = sub.add_parser("plan", help="Generate plan with local Ollama from approved evidence")
+    plan.add_argument("topic_id")
+    draft = sub.add_parser("draft", help="Validate and store a structured local plan JSON")
+    draft.add_argument("json_path")
+    draft.add_argument("--footage-first", action="store_true",
+                       help="Permit a shorter, non-padded Short with an editorial reason")
+    draft.add_argument("--reason", default="")
+    render = sub.add_parser("render", help="Render footage and approved-voice narration")
+    render.add_argument("plan_id")
+    rev = sub.add_parser("review", help="Inspect current revision, QC and readiness")
+    rev.add_argument("plan_id")
+    approval = sub.add_parser("approve", help="Approve an exact video SHA-256")
+    approval.add_argument("plan_id")
+    approval.add_argument("sha256")
+    for field in review.REQUIRED_ATTESTATIONS:
+        approval.add_argument(f"--verify-{field}", action="store_true")
+    exp = sub.add_parser("export", help="Generate a local manual-upload package only")
+    exp.add_argument("plan_id")
+    exp.add_argument("--platform", required=True, choices=review.PLATFORMS)
+    exp.add_argument("--dry-run", action="store_true")
+    queue = sub.add_parser("queue", help="Queue one serial render job idempotently")
+    queue.add_argument("plan_id")
+    retry = sub.add_parser("retry", help="Retry a failed job within the attempts bound")
+    retry.add_argument("job_id")
+    run = sub.add_parser("run", help="Draft, recover, enqueue and drain one bounded batch")
+    run.add_argument("--limit", type=int,
+                     help="Maximum jobs to process this batch (default: queue bound)")
+    run.add_argument("--no-draft", action="store_true",
+                     help="Skip LLM drafting and only process existing work")
+    srv = sub.add_parser("serve", help="Read-only local review UI on 127.0.0.1")
+    srv.add_argument("--port", type=int, default=8787)
+    perf = sub.add_parser("analytics", help="Import or report authorized local analytics JSON")
+    perf.add_argument("action", choices=("import", "report"))
+    perf.add_argument("path", nargs="?")
+    bench = sub.add_parser("competitors", help="Import or report permitted public metadata JSON")
+    bench.add_argument("action", choices=("import", "report"))
+    bench.add_argument("path", nargs="?")
+    sub.add_parser("simulate", help="Run synthetic nonpublishable fixture demonstration")
+    svc = sub.add_parser("services", help="Manage the local launchd desk agent")
+    svc.add_argument("action", choices=("install", "status", "pause", "resume",
+                                       "health", "uninstall"))
+    yt = sub.add_parser("youtube", help="Authorized read-only YouTube integration")
+    yt.add_argument("action", choices=("migrate", "auth", "status", "sync",
+                                       "analytics", "competitors", "link", "upload"))
+    yt.add_argument("--env", help="NewsRoom-style .env to import allowlisted keys from")
+    yt.add_argument("--json", help="Google OAuth client_secret JSON to import")
+    yt.add_argument("--plan", help="plan_id for link/upload")
+    yt.add_argument("--video", help="YouTube video_id for link")
+    yt.add_argument("--ack", action="store_true",
+                    help="operator acknowledgement for upload attempts")
+    yt.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def _ollama_up(cfg: dict) -> bool:
+    import urllib.request
+    base = cfg.get("llm", {}).get("base_url", "")
+    if not base:
+        return False
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/api/tags", timeout=3) as response:
+            return response.status == 200
+    except (OSError, ValueError):
+        return False
+
+
+def doctor() -> dict:
+    cfg = settings()
+    encoders = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=30
+                              ).stdout if shutil.which("ffmpeg") else ""
+    kokoro = False
+    try:
+        import mlx_audio  # noqa: F401
+        kokoro = True
+    except ImportError:
+        pass
+    free_gb = round(shutil.disk_usage(ROOT).free / 1024**3, 1)
+    required = {"macos_arm64": platform.system() == "Darwin" and platform.machine() == "arm64",
+                "ffmpeg": bool(shutil.which("ffmpeg")),
+                "ffprobe": bool(shutil.which("ffprobe")),
+                "videotoolbox_encoder": "h264_videotoolbox" in encoders,
+                "whisper": bool(shutil.which("whisper-cli")),
+                "whisper_model": (ROOT / cfg["alignment"]["model_path"]).is_file(),
+                "kokoro_importable": kokoro,
+                "voice_approved": cfg["voice"]["approved"],
+                "disk_free": free_gb >= cfg["storage"]["min_free_gb"]}
+    optional = {"ollama_installed": bool(shutil.which("ollama")),
+                "ollama_reachable": _ollama_up(cfg),
+                "youtube_authorized": bool(google_auth.load_store().get("refresh_token")),
+                "youtube_configured": bool(google_auth.load_store().get("client_id")),
+                "launchd_installed": (service.AGENTS / f"{service.LABEL}.plist").is_file()}
+    return {"required": required, "optional": optional,
+            "ok": all(required.values()),
+            "missing_required": sorted(k for k, v in required.items() if not v),
+            "machine": platform.machine(), "free_gb": free_gb,
+            "publishing_enabled": False}
+
+
+def dispatch(args: argparse.Namespace) -> object:
+    if args.command == "doctor":
+        return doctor()
+    if args.command == "simulate":
+        from .simulation import demo
+        return demo()
+    conn = connect()
+    try:
+        if args.command == "status":
+            return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in ("topics", "facts", "assets", "plans", "jobs", "analytics", "competitors")}
+        if args.command == "topic":
+            return evidence.add_topic(conn, args.species, args.scientific_name, args.pillar)
+        if args.command == "topics":
+            return creative.rank_topics(conn)
+        if args.command == "fact":
+            return evidence.add_fact(conn, args.topic_id, args.statement, args.organization,
+                                     args.source_ref, args.excerpt, args.retrieved_at,
+                                     supersedes=args.supersedes)
+        if args.command == "verify-fact":
+            evidence.approve_fact(conn, args.fact_id)
+            return "fact approved after operator verification"
+        if args.command == "asset":
+            return media.import_asset(conn, Path(args.path), source_ref=args.source_ref,
+                                      creator=args.creator, license_type=args.license_type,
+                                      evidence=args.evidence, attribution=args.attribution,
+                                      species=args.species, behavior=args.behavior,
+                                      commercial=args.commercial, modifications=args.modifications,
+                                      expires_at=args.expires_at, test_only=args.test_only)
+        if args.command == "assets":
+            return [dict(a) for a in conn.execute("SELECT * FROM assets")]
+        if args.command in ("commons-search", "commons-import"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for Commons access")
+            if args.command == "commons-search":
+                return commons.search(args.query)
+            return {"asset_id": commons.import_video(conn, args.title, args.species,
+                                                       ROOT / "cache" / "commons"),
+                    "approved": False, "requires_operator_rights_review": True}
+        if args.command in ("source-search", "source-list", "source-import"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for external source access")
+            if args.command == "source-search":
+                return sources.search(args.source, args.query)
+            if args.command == "source-list":
+                return sources.list_category(args.source, args.url)
+            return {"asset_id": sources.import_video(conn, args.source, args.ref,
+                                                       args.species, ROOT / "cache" / "sources"),
+                    "approved": False, "requires_operator_rights_review": True}
+        if args.command in ("research-search", "research-propose"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for Wikipedia access")
+            if args.command == "research-search":
+                return research.search(args.query)
+            return {"proposed": research.propose(conn, args.topic_id, args.title),
+                    "status": "proposed", "requires_operator_verification": True}
+        if args.command == "reject-fact":
+            evidence.reject_fact(conn, args.fact_id)
+            return "fact rejected"
+        if args.command == "inspect-asset":
+            return media.inspect_asset(conn, args.asset_id, ROOT / "cache" / "media")
+        if args.command == "verify-rights":
+            media.approve_asset(conn, args.asset_id)
+            return "rights approved after operator verification"
+        if args.command == "plan":
+            return creative.generate_plan(conn, args.topic_id)
+        if args.command == "draft":
+            return creative.save_plan(conn, json.loads(Path(args.json_path).read_text()),
+                                      footage_first=args.footage_first, reason=args.reason)
+        if args.command == "render":
+            return editor.compose(conn, args.plan_id)
+        if args.command == "review":
+            row = conn.execute("SELECT * FROM plans WHERE id=?", (args.plan_id,)).fetchone()
+            return {"plan": dict(row), "blocking": review.review_errors(conn, row)} if row else "unknown plan"
+        if args.command == "approve":
+            verified = tuple(field for field in review.REQUIRED_ATTESTATIONS
+                             if getattr(args, f"verify_{field}"))
+            review.approve(conn, args.plan_id, args.sha256, verified=verified)
+            return "exact revision approved"
+        if args.command == "export":
+            return review.export(conn, args.plan_id, args.platform, dry_run=args.dry_run)
+        if args.command == "queue":
+            return {"enqueued": scheduler.enqueue(conn, "render", args.plan_id)}
+        if args.command == "retry":
+            return {"requeued": scheduler.retry(conn, args.job_id)}
+        if args.command == "run":
+            cfg = settings()
+            run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{os.getpid()}"
+            conn.execute("INSERT INTO runs(id,started_at) VALUES(?,?)",
+                         (run_id, datetime.now(timezone.utc).isoformat()))
+            syncs = {}
+            store = google_auth.load_store()
+            if cfg.get("youtube", {}).get("enabled") and store.get("refresh_token"):
+                for name, fn in (("uploads", youtube.sync_uploads),
+                                 ("analytics", youtube.sync_analytics),
+                                 ("competitors", youtube.sync_competitors)):
+                    try:
+                        syncs[name] = fn(conn)
+                    except Exception as exc:
+                        syncs[name] = {"error": str(exc)[:200]}
+            target = cfg["production"]["daily_review_target"]
+            if args.no_draft:
+                drafted, draft_stage = {"drafted": [], "errors": {}}, "SKIPPED"
+            elif not _ollama_up(cfg):
+                drafted, draft_stage = {"drafted": [], "errors": {}}, "WAITING_FOR_MODEL"
+            else:
+                drafted, draft_stage = creative.draft_ready(conn, limit=target), "DRAFTED"
+            ready = conn.execute(
+                "SELECT id FROM plans WHERE status='SCRIPT_READY' ORDER BY created_at LIMIT ?",
+                (target,)).fetchall()
+            enqueued = sum(1 for row in ready if scheduler.enqueue(conn, "render", row["id"]))
+            recovered = scheduler.recover(conn)
+            limit = args.limit or cfg["workers"]["queue_size"]
+            summary = {"draft_stage": draft_stage, "syncs": syncs,
+                       "drafted": drafted["drafted"], "plan_errors": drafted["errors"],
+                       "needs_media": drafted.get("needs_media", {}),
+                       "needs_evidence": drafted.get("needs_evidence", {}),
+                       "enqueued": enqueued, "recovered": recovered,
+                       "jobs": asyncio.run(scheduler.drain(conn, editor.compose, limit=limit))}
+            conn.execute("UPDATE runs SET finished_at=?,summary=? WHERE id=?",
+                         (datetime.now(timezone.utc).isoformat(),
+                          json.dumps(summary, default=str), run_id))
+            return summary
+        if args.command == "serve":
+            return server.serve(port=args.port)
+        if args.command == "services":
+            if args.action == "install":
+                return service.install(ROOT, service.AGENTS)
+            if args.action == "status":
+                return service.status()
+            if args.action == "pause":
+                return service.pause(ROOT)
+            if args.action == "resume":
+                return service.resume(ROOT)
+            if args.action == "health":
+                return service.health(ROOT)
+            return service.uninstall()
+        if args.command == "analytics":
+            if args.action == "import":
+                if not args.path:
+                    raise ValueError("analytics import requires a local JSON path")
+                return {"imported": analytics.import_snapshots(conn, Path(args.path))}
+            return analytics.report(conn)
+        if args.command == "competitors":
+            if args.action == "import":
+                if not args.path:
+                    raise ValueError("competitors import requires an authorized metadata JSON path")
+                return {"imported": competitors.import_metadata(conn, Path(args.path))}
+            return competitors.report(conn)
+        if args.command == "youtube":
+            if not settings().get("youtube", {}).get("enabled"):
+                raise ValueError("youtube integration is disabled in config")
+            if args.action == "migrate":
+                return google_auth.migrate(env=Path(args.env) if args.env else None,
+                                           client_json=Path(args.json) if args.json else None)
+            if args.action == "auth":
+                return google_auth.authorize()
+            if args.action == "status":
+                return google_auth.status()
+            if args.action == "sync":
+                return youtube.sync_uploads(conn)
+            if args.action == "analytics":
+                return youtube.sync_analytics(conn)
+            if args.action == "competitors":
+                return youtube.sync_competitors(conn)
+            if args.action == "link":
+                if not args.plan or not args.video:
+                    raise ValueError("link requires --plan and --video")
+                return youtube.link_video(conn, args.plan, args.video)
+            if args.action == "upload":
+                if not args.plan:
+                    raise ValueError("upload requires --plan")
+                return youtube.upload(conn, args.plan, operator_ack=args.ack,
+                                      dry_run=args.dry_run or not args.ack)
+        raise ValueError("unsupported command")
+    finally:
+        conn.close()
+
+
+def main() -> int:
+    p = parser()
+    args = p.parse_args()
+    try:
+        print(json.dumps(dispatch(args), indent=2, default=str))
+    except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+        p.exit(1, f"error: {exc}\n")
+    return 0

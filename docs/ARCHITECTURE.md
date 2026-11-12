@@ -8,9 +8,18 @@ service, CLI, macOS, publish, editorial and Gmail code.
 ## Boundaries and flow
 
 `operator topic -> evidence ledger -> asset catalog -> ranked backlog ->
-creative JSON -> deterministic claim/rights validation -> TTS -> alignment ->
-video clips + narration + captions -> FFprobe/QC -> immutable manifest ->
-operator approval of hash -> local per-platform export -> imported analytics`.
+footage budget -> creative JSON -> deterministic claim/rights validation ->
+TTS -> alignment -> video clips + narration + captions -> FFprobe/QC ->
+immutable manifest (+evidence snapshot) -> operator approval of hash ->
+local per-platform export -> authorized read-only analytics ingestion`.
+
+Before planning, `budget.footage_budget` computes usable media seconds,
+directional species matches, shot windows and a MICRO/STANDARD/EXTENDED
+profile; the LLM receives the contract and `save_plan` re-enforces it.
+Google access is an allowlist credential migration into a gitignored
+`secrets/google.json`, read-only OAuth scopes, channel-identity
+verification, and bounded retries. Upload transport exists only as a
+dormant, separately-gated adapter.
 
 SQLite WAL, a single writer and unique job keys protect durable state. The
 creative model reads evidence but does not approve it or perform writes.
@@ -46,12 +55,18 @@ local export and recovery. D. Authorized metadata/analytics imports, weekly
 reports and evidence-based ranking. Missing capabilities are not inferred
 from diagrams: see operations and testing for actual implemented scope.
 
-Initial implementation covers local evidence/asset entry and review, basic
-heuristic ranking, local LLM JSON planning, video-clip composition, strict
-voice and caption prerequisites, manual review/export, serial jobs and local
-analytics/competitor imports. It does not yet cover autonomous science
-research, licensed media search, subject tracking, loudness QC, fully
-autonomous three-video batch production or weekly optimization.
+Implemented so far: evidence/asset entry and triage (manual, Wikipedia
+proposals, bounded Commons video import), directional-species footage
+budgets with MICRO/STANDARD/EXTENDED profile selection, versioned
+explainable ranking, local LLM planning under the budget contract, strict
+voice + resident Kokoro worker, loudness/black/caption QC, revision-bound
+review/export, bounded `run` batches with crash recovery and a circuit
+breaker, launchd agent with pause/resume/health, read-only review/triage/
+dashboard UI, and read-only YouTube Data + Analytics + competitor
+ingestion behind allowlisted credential migration and channel-identity
+checks. Not implemented: live upload transport (dormant adapter only),
+machine-verified species/crop judgment, subject tracking and demographic
+analytics.
 
 ## Acceptance
 

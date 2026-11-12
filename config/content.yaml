@@ -1,0 +1,23 @@
+pillars:
+  - Biological Superpowers
+  - Tiny but Extraordinary
+  - Unexpected Relationships
+  - Nature's Transformations
+benchmark_channels:
+  - platform: youtube
+    handle: "@Snugbarn"
+# A generic topic may use footage tagged with a more specific species in
+# its family; a species-tagged clip never satisfies a generic tag on a
+# specific topic. Only additive entries — exact species always matches.
+taxonomy:
+  Mantis shrimp:
+    - Mantis shrimp
+    - Peacock mantis shrimp
+  Cuttlefish:
+    - Cuttlefish
+    - Giant cuttlefish
+    - Flamboyant cuttlefish
+  Pika:
+    - Pika
+    - American pika
+    - Collared pika

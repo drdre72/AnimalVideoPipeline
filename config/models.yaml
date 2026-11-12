@@ -1,0 +1,6 @@
+llm:
+  preferred: qwen3:8b
+tts:
+  backend: kokoro_mlx
+alignment:
+  backend: whisper_cpp

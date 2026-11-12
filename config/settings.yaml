@@ -1,0 +1,73 @@
+project:
+  name: Naminal Hub
+storage:
+  database: naminal.db
+  min_free_gb: 10
+  min_available_gb: 2
+workers:
+  queue_size: 16
+  max_attempts: 3
+  stale_after_s: 1800
+  circuit_breaker: 3
+  llm: 1
+  tts: 1
+  alignment: 1
+  video: 1
+production:
+  daily_review_target: 2
+ranking:
+  formula_version: v2
+  outlier_views_per_day: 500
+  weights:
+    evidence: 2.0
+    footage: 10.0
+    specificity: 2.0
+    rights: 5.0
+    own_performance: 8.0
+    comparable_demand: 4.0
+    novelty: 3.0
+    behavior: 2.0
+    cost: -2.0
+service:
+  interval_s: 3600
+  run_limit: 2
+publishing:
+  automatic: false
+  uploads_enabled: false
+  messaging_enabled: false
+  destinations: []
+youtube:
+  enabled: true
+  secrets_file: secrets/google.json
+  channel_id: "UCg1MBoQ5oxwaYRu7H6W7Tww"
+  channel_handle: "@NaminalHub"
+  upload_enabled: false
+  max_retries: 3
+  retry_backoff_s: 2
+footage:
+  max_shot_s: 30
+  micro_min_s: 15
+  standard_min_s: 30
+  narration_wps: 2.4
+render:
+  width: 1080
+  height: 1920
+  fps: 30
+  encoder: h264_videotoolbox
+  min_duration_s: 61
+  max_duration_s: 70
+  exception_min_duration_s: 15
+  loudness_target: -14
+  loudness_tolerance: 1.5
+voice:
+  backend: kokoro_mlx
+  model: mlx-community/Kokoro-82M-bf16
+  approved: true
+  name: af_bella
+  strict: true
+  max_gain_db: 20
+alignment:
+  model_path: models/ggml-base.en.bin
+llm:
+  model: qwen3:8b
+  base_url: http://127.0.0.1:11434

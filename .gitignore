@@ -10,5 +10,7 @@ cache/
 logs/
 models/
 .env
+.env.*
+secrets/
 *.part.mp4
 .DS_Store
