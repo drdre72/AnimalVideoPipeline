@@ -19,6 +19,8 @@ MAX_METADATA_BYTES = 1_000_000
 MAX_MEDIA_BYTES = 200_000_000
 LICENSES = {
     "CC BY 2.0": "/licenses/by/2.0",
+    "CC BY 2.5": "/licenses/by/2.5",
+    "CC BY 2.5 au": "/licenses/by/2.5/au",
     "CC BY 3.0": "/licenses/by/3.0",
     "CC BY 4.0": "/licenses/by/4.0",
     "CC0": "/publicdomain/zero/1.0",

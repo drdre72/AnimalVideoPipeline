@@ -11,7 +11,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import analytics, commons, competitors, creative, editor, evidence, google_auth, media, research, review, scheduler, server, service, youtube
+from . import analytics, commons, competitors, creative, editor, evidence, google_auth, media, research, review, scheduler, server, service, sources, youtube
 from .core import ROOT, connect, settings
 
 
@@ -49,6 +49,20 @@ def parser() -> argparse.ArgumentParser:
     commons_import.add_argument("title")
     commons_import.add_argument("--species", required=True)
     commons_import.add_argument("--allow-network", action="store_true")
+    source_names = sorted(sources.SOURCES)
+    src_search = sub.add_parser("source-search", help="Search an external footage source API")
+    src_search.add_argument("source", choices=source_names)
+    src_search.add_argument("query")
+    src_search.add_argument("--allow-network", action="store_true")
+    src_list = sub.add_parser("source-list", help="List video links on a gallery category page")
+    src_list.add_argument("source", choices=source_names)
+    src_list.add_argument("url")
+    src_list.add_argument("--allow-network", action="store_true")
+    src_import = sub.add_parser("source-import", help="Download one source video into unapproved catalog")
+    src_import.add_argument("source", choices=source_names)
+    src_import.add_argument("ref", help="video page URL or API item id")
+    src_import.add_argument("--species", required=True)
+    src_import.add_argument("--allow-network", action="store_true")
     research_search = sub.add_parser("research-search",
                                      help="Search Wikipedia article titles via the official API")
     research_search.add_argument("query")
@@ -200,6 +214,16 @@ def dispatch(args: argparse.Namespace) -> object:
                 return commons.search(args.query)
             return {"asset_id": commons.import_video(conn, args.title, args.species,
                                                        ROOT / "cache" / "commons"),
+                    "approved": False, "requires_operator_rights_review": True}
+        if args.command in ("source-search", "source-list", "source-import"):
+            if not args.allow_network:
+                raise ValueError("explicit --allow-network required for external source access")
+            if args.command == "source-search":
+                return sources.search(args.source, args.query)
+            if args.command == "source-list":
+                return sources.list_category(args.source, args.url)
+            return {"asset_id": sources.import_video(conn, args.source, args.ref,
+                                                       args.species, ROOT / "cache" / "sources"),
                     "approved": False, "requires_operator_rights_review": True}
         if args.command in ("research-search", "research-propose"):
             if not args.allow_network:

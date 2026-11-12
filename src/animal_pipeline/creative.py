@@ -4,7 +4,7 @@ import json
 import sqlite3
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .budget import footage_budget, select_profile, species_match
 from .core import canonical_hash, new_id, now, settings
@@ -28,10 +28,18 @@ def _topic_feedback(conn: sqlite3.Connection, topic_id: str) -> float | None:
             latest[key] = row
     rates = []
     for row in latest.values():
-        age = (datetime.fromisoformat(row["observed_at"]) -
-               datetime.fromisoformat(row["published_at"])).total_seconds() / 86400
+        age = (_parse_ts(row["observed_at"]) -
+               _parse_ts(row["published_at"])).total_seconds() / 86400
         rates.append(row["views"] / max(age, 1))
     return sorted(rates)[len(rates) // 2] if rates else None
+
+
+def _parse_ts(value: str) -> datetime:
+    """Snapshots mix ISO forms ('2026-11-12', '2026-11-09T19:07:53Z')."""
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _comparable_demand(conn: sqlite3.Connection, species: str) -> float | None:
@@ -42,8 +50,8 @@ def _comparable_demand(conn: sqlite3.Connection, species: str) -> float | None:
     for row in conn.execute("SELECT title,uploaded_at,observed_at,views FROM competitors"):
         if keyword not in (row["title"] or "").lower():
             continue
-        days = max(1.0, (datetime.fromisoformat(row["observed_at"]) -
-                         datetime.fromisoformat(row["uploaded_at"])).total_seconds() / 86400)
+        days = max(1.0, (_parse_ts(row["observed_at"]) -
+                         _parse_ts(row["uploaded_at"])).total_seconds() / 86400)
         rates.append(row["views"] / days)
     return sorted(rates)[len(rates) // 2] if rates else None
 

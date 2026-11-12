@@ -108,6 +108,21 @@ def test_commons_accepts_cc0_license_url_variants(tmp_path, monkeypatch, footage
     conn.close()
 
 
+def test_commons_accepts_cc_by_25_jurisdiction_variant(tmp_path, monkeypatch, footage):
+    metadata = _metadata(license_name="CC BY 2.5 au").replace(
+        b"https://creativecommons.org/licenses/by/2.0",
+        b"https://creativecommons.org/licenses/by/2.5/au/deed.en")
+    def open_response(url, hosts):
+        return Response(metadata if "api.php" in url else footage, url)
+    monkeypatch.setattr(commons, "_open", open_response)
+    conn = connect(tmp_path / "catalog.db")
+    asset_id = commons.import_video(conn, "File:Quokka.webm", "Quokka",
+                                    tmp_path / "cache")
+    assert conn.execute("SELECT license_type,approved FROM assets WHERE id=?",
+                        (asset_id,)).fetchone()[:] == ("CC BY 2.5 au", 0)
+    conn.close()
+
+
 @pytest.mark.parametrize("license_url", [
     "https://creativecommons.org/publicdomain/zero/2.0",
     "https://creativecommons.org.evil.test/licenses/by/2.0",
