@@ -166,12 +166,38 @@ def align(audio: Path, script: str, prefix: Path) -> list[dict]:
          "-of", "default=noprint_wrappers=1:nokey=1", str(audio)],
         capture_output=True, text=True, check=True, timeout=60).stdout.strip())
     chunks = json.loads(prefix.with_suffix(".json").read_text()).get("transcription", [])
-    captions = []
+    words = lambda s: set(re.findall(r"[a-z]+", s.lower()))
+    expected = words(script)
+    actual = words(" ".join(c.get("text", "") for c in chunks))
+    if expected and len(expected & actual) / len(expected) < 0.75:
+        raise RuntimeError("caption alignment does not match narration script")
+    captions = _script_captions(chunks, script, duration)
+    if not captions:
+        raise RuntimeError("caption alignment does not match narration script")
+    return captions
+
+
+def _script_captions(chunks: list[dict], script: str, duration: float) -> list[dict]:
+    script_words = script.split()
+    spans: list[tuple[float, float, int]] = []
+    total = 0
     for chunk in chunks:
         start = chunk["offsets"]["from"] / 1000
         end = min(duration, chunk["offsets"]["to"] / 1000)
-        words = chunk.get("text", "").split()
-        if not words or start >= duration or end <= start:
+        count = len(chunk.get("text", "").split())
+        if count and start < duration and end > start:
+            spans.append((start, end, count))
+            total += count
+    captions: list[dict] = []
+    used = 0
+    cumulative = 0
+    n = len(script_words)
+    for idx, (start, end, count) in enumerate(spans):
+        cumulative += count
+        boundary = n if idx == len(spans) - 1 else round(cumulative / total * n)
+        words = script_words[used:boundary]
+        used = boundary
+        if not words:
             continue
         groups: list[list[str]] = []
         for word in words:
@@ -187,11 +213,6 @@ def align(audio: Path, script: str, prefix: Path) -> list[dict]:
                              "text": " ".join(group)})
     if any(c["end"] <= c["start"] for c in captions):
         raise RuntimeError("invalid caption timestamps")
-    words = lambda s: set(re.findall(r"[a-z]+", s.lower()))
-    expected = words(script)
-    actual = words(" ".join(c["text"] for c in captions))
-    if not captions or (expected and len(expected & actual) / len(expected) < 0.75):
-        raise RuntimeError("caption alignment does not match narration script")
     return captions
 
 

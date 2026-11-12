@@ -513,6 +513,37 @@ def test_whisper_caption_times_are_clamped_to_audio(tmp_path, monkeypatch):
     assert all(len(c["text"]) <= 42 for c in captions)
 
 
+def test_captions_use_script_text_over_whisper_mishearing(tmp_path, monkeypatch):
+    from animal_pipeline import audio
+    source = tmp_path / "speech.wav"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                    str(source)], check=True, timeout=60)
+    model = tmp_path / "model.bin"
+    model.touch()
+    monkeypatch.setattr(audio, "settings", lambda: {"alignment": {"model_path": str(model)}})
+    original_run = subprocess.run
+    def run(cmd, **kwargs):
+        if cmd[0] == "whisper-cli":
+            Path(cmd[cmd.index("-of") + 1] + ".json").write_text(
+                json.dumps({"transcription": [
+                    {"offsets": {"from": 0, "to": 1500},
+                     "text": "The axolotyl is a mole"},
+                    {"offsets": {"from": 1500, "to": 30000},
+                     "text": "salamander that stays larval"}]}))
+            return subprocess.CompletedProcess(cmd, 0)
+        return original_run(cmd, **kwargs)
+    monkeypatch.setattr(audio.subprocess, "run", run)
+    captions = audio.align(
+        source, "The axolotl is a mole salamander that stays larval",
+        tmp_path / "timing")
+    joined = " ".join(c["text"] for c in captions)
+    assert "axolotyl" not in joined
+    assert "axolotl" in joined
+    assert joined.split() == "The axolotl is a mole salamander that stays larval".split()
+    assert all(c["end"] > c["start"] for c in captions)
+
+
 def test_plan_min_duration_honors_recorded_profiles():
     cfg = {"min_duration_s": 61, "exception_min_duration_s": 15}
     micro = {"footage_profile": {"profile": "MICRO"}}
