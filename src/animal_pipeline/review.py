@@ -85,10 +85,18 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
     plan = json.loads(row["content"])
     assets = [conn.execute("SELECT * FROM assets WHERE id=?", (s["asset_id"],)).fetchone()
               for s in plan["segments"]]
+    species = conn.execute("SELECT species FROM topics WHERE id=?",
+                           (plan["topic_id"],)).fetchone()["species"]
+    species_tag = "#" + "".join(w.capitalize() for w in species.split())
+    hashtags = plan.get("hashtags") or [species_tag, "#Animals", "#Wildlife",
+                                      "#CuteAnimals", "#Nature", "#Shorts"]
+    description = plan.get("description", "")
+    if " ".join(hashtags) not in description:
+        description = f"{description}\n\n{' '.join(hashtags)}".strip()
     package = {"brand": "Naminal Hub", "platform": platform, "plan_id": plan_id,
                "revision": row["revision"], "sha256": row["video_hash"],
-               "title": plan["title"], "description": plan.get("description", ""),
-               "hashtags": plan.get("hashtags", []),
+               "title": plan["title"], "description": description,
+               "hashtags": hashtags,
                "thumbnail": "thumbnail.jpg",
                "attribution": sorted({a["attribution"] for a in assets if a["attribution"]}),
                "disclosure_checklist": ["Confirm species, rights and facts",
