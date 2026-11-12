@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .core import ROOT, digest, settings
+from .editor import plan_min_duration
 from .evidence import validate_segments
 from .media import probe, rights_errors
 
@@ -29,8 +30,7 @@ def review_errors(conn: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
         try:
             video = probe(Path(row["video_path"]))
             cfg = settings()["render"]
-            min_duration = (cfg["exception_min_duration_s"] if plan.get("runtime_exception")
-                            else cfg["min_duration_s"])
+            min_duration = plan_min_duration(plan, cfg)
             if video["width"] != cfg["width"] or video["height"] != cfg["height"] or not (
                     min_duration <= video["duration"] <= cfg["max_duration_s"] + 0.2):
                 errors.append("video no longer matches approved output profile")
