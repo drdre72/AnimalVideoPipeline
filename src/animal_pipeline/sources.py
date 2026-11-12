@@ -309,11 +309,12 @@ def _finish_import(conn: sqlite3.Connection, src: Source, *, tmp_path: Path, cac
                                "note": src.note, "retrieved_at": now()})
         credit = (f"{creator}, {title}, {src.license}, {page}; "
                   f"courtesy {src.attribution}; edited by Naminal Hub")
+        # Restrictions is a hard rights gate reserved for per-item problems
+        # the operator must clear; source policy notes stay in evidence.
         return import_asset(conn, path, source_ref=page, creator=creator,
                             license_type=src.license, evidence=evidence,
                             attribution=credit, species=species,
-                            commercial=True, modifications=True,
-                            restrictions=src.note if "third-party" in src.note else "")
+                            commercial=True, modifications=True)
     finally:
         tmp_path.unlink(missing_ok=True)
 

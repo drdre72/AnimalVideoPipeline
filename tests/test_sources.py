@@ -68,7 +68,7 @@ def test_gallery_import_records_pd_rights(tmp_path, monkeypatch):
     asset = conn.execute("SELECT * FROM assets WHERE id=?", (aid,)).fetchone()
     assert asset["license_type"] == sources.PD_USGOV
     assert asset["commercial"] == 1 and asset["modifications"] == 1
-    assert "NOAA" in asset["attribution"] and "third-party" in asset["restrictions"]
+    assert "NOAA" in asset["attribution"] and not asset["restrictions"]
     evidence = json.loads(asset["evidence"])
     assert evidence["license"].startswith("https://")
 
