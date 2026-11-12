@@ -39,7 +39,7 @@ publishing:
 youtube:
   enabled: true
   secrets_file: secrets/google.json
-  channel_id: ""
+  channel_id: "UCg1MBoQ5oxwaYRu7H6W7Tww"
   channel_handle: "@NaminalHub"
   upload_enabled: false
   max_retries: 3
