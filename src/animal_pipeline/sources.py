@@ -74,7 +74,10 @@ SOURCES: dict[str, Source] = {
             hosts=frozenset({"www.fws.gov"}),
             note=("B-roll shot by USFWS/NCTC videographers; free to use with "
                   "credit requested. Licensed-music caveat is moot: source "
-                  "audio is never used."),
+                  "audio is never used. KNOWN GAP: fws.gov embeds VBrick "
+                  "players (fws.rev.vbrick.com) which yt-dlp does not "
+                  "support — NCTC pages list titles but source-import needs "
+                  "a VBrick-capable extractor or manual download."),
         ),
         Source(
             key="nps",
