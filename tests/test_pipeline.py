@@ -63,6 +63,25 @@ def test_spelled_out_magnitude_is_not_exempt_from_fact_gate(conn, setup):
         creative.save_plan(conn, plan(topic, fact, asset, "It has millions of ears."))
 
 
+def test_abbreviated_measurements_are_rejected_for_spoken_narration(conn, setup):
+    topic, fact, asset = setup
+    errors = evidence.validate_segments(conn, topic, [
+        {"text": "It stands 2 cm tall.", "fact_ids": [fact]},
+        {"text": "It weighs 2 kg.", "fact_ids": [fact]},
+        {"text": "It is 2% ear.", "fact_ids": [fact]},
+    ])
+    assert errors == [
+        "segment 0: spell out measurement for narration: 2 cm",
+        "segment 1: spell out measurement for narration: 2 kg",
+        "segment 2: spell out measurement for narration: 2%",
+    ]
+    assert evidence.validate_segments(conn, topic, [
+        {"text": "It stands 2 centimeters tall.", "fact_ids": [fact]},
+        {"text": "It weighs 2 kilograms.", "fact_ids": [fact]},
+        {"text": "It is 2 percent ear.", "fact_ids": [fact]},
+    ]) == []
+
+
 def test_missing_or_expired_rights(conn, setup):
     topic, fact, asset = setup
     conn.execute("UPDATE assets SET evidence='' WHERE id=?", (asset,))

@@ -10,6 +10,11 @@ QUANTITIES = re.compile(
     r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|dozens?|hundreds?|thousands?|millions?|billions?|"
     r"always|never|instantly|instant)\b", re.IGNORECASE)
+# Narration is spoken: digits must be followed by spelled-out units
+# ("8 centimeters"), never abbreviations TTS would read as letters.
+ABBREVIATED_UNITS = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:mm|cm|km|kg|mg|lb|oz|ft|mph|kmh|km/h|"
+    r"°[CF]?|m|g|s|h)\b|\d+(?:[.,]\d+)?\s*%")
 
 
 def add_topic(conn: sqlite3.Connection, species: str, scientific_name: str, pillar: str) -> str:
@@ -88,6 +93,9 @@ def validate_segments(conn: sqlite3.Connection, topic_id: str, segments: list[di
             if not re.search(r"\b" + re.escape(match.group()).lower() + r"\b",
                              support.lower()):
                 errors.append(f"segment {i}: unsupported quantity {match.group()}")
+        for match in ABBREVIATED_UNITS.finditer(text):
+            errors.append(
+                f"segment {i}: spell out measurement for narration: {match.group()}")
         if topic["scientific_name"].lower() in text.lower() and not facts:
             errors.append(f"segment {i}: species not evidenced")
     return errors

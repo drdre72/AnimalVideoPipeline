@@ -142,7 +142,9 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
                          "shot must fit inside its asset's in_s..out_s window (start_s + "
                          "duration_s <= that asset's duration) and stay under "
                          "limits.max_shot_s, shots on the same asset must not overlap, and the "
-                         "whole script must read within narration.estimated_max_words words.",
+                         "whole script must read within narration.estimated_max_words words. "
+                         "Segment text is spoken aloud: write measurements in words "
+                         "('8 centimeters'), never abbreviations ('8 cm').",
                          "topic": dict(topic), "facts": facts,
                          "footage_budget": footage})
     req = urllib.request.Request(config["base_url"].rstrip("/") + "/api/generate",
