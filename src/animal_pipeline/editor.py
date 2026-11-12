@@ -128,10 +128,22 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
         args += ["-ss", str(shot["start_s"]), "-t", str(shot["duration_s"]),
                  "-i", asset["path"]]
         focus = max(0.0, min(1.0, float(shot.get("focus_x", 0.5))))
-        filters.append(
-            f"[{i}:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height}:x=(iw-{width})*{focus:.3f}:y=(ih-{height})/2,"
-            f"setsar=1,trim=duration={float(shot['duration_s']):.3f},setpts=PTS-STARTPTS[v{i}]")
+        zoom = max(0.2, min(1.0, float(shot.get("zoom", 1.0))))
+        dur = float(shot["duration_s"])
+        if zoom < 0.999:
+            filters.append(
+                f"[{i}:v]fps={fps},split[bg{i}][fg{i}];"
+                f"[bg{i}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:x=(iw-{width})*{focus:.3f}:y=(ih-{height})/2,"
+                f"boxblur=24:6[bgi{i}];"
+                f"[fg{i}]scale={int(width * zoom)}:-2[fgi{i}];"
+                f"[bgi{i}][fgi{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,"
+                f"trim=duration={dur:.3f},setpts=PTS-STARTPTS[v{i}]")
+        else:
+            filters.append(
+                f"[{i}:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:x=(iw-{width})*{focus:.3f}:y=(ih-{height})/2,"
+                f"setsar=1,trim=duration={dur:.3f},setpts=PTS-STARTPTS[v{i}]")
     captions = []
     gain_db = 0.0
     if not simulation:
