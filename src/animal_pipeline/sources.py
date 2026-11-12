@@ -111,6 +111,18 @@ SOURCES: dict[str, Source] = {
             note="Commercial use and modification allowed without attribution.",
         ),
         Source(
+            key="vecteezy",
+            name="Vecteezy",
+            license="Vecteezy License (free tier)",
+            license_url="https://www.vecteezy.com/licensing-agreement",
+            attribution="Vecteezy",
+            hosts=frozenset({"api.vecteezy.com", "files.vecteezy.com"}),
+            kind="api",
+            api_key_name="vecteezy",
+            note=("Free-tier downloads: attribution required (link to vecteezy.com), "
+                  "500/month cap. Key stored as 'vecteezy_<account>' in sources.json."),
+        ),
+        Source(
             key="coverr",
             name="Coverr",
             license="Coverr License",
@@ -222,6 +234,25 @@ def _download(url: str, dest: Path, extra_hosts: set[str] | None = None) -> Path
     return tmp_path
 
 
+def _vecteezy_creds(keys: dict) -> tuple[str, str]:
+    """sources.json holds e.g. "vecteezy_ID230020": "<token>" — the numeric
+    part (without the 'ID' prefix) is the account id in API paths."""
+    for name, token in keys.items():
+        m = re.fullmatch(r"vecteezy_?ID?(\d+)", name)
+        if m and token:
+            return m.group(1), token
+    raise ValueError("missing vecteezy creds: add 'vecteezy_ID<account>': '<token>'")
+
+
+def _vecteezy_get(acct: str, token: str, path: str) -> dict:
+    req = net.bounded_request(
+        f"https://api.vecteezy.com/v2/{acct}{path}",
+        {"api.vecteezy.com"}, name="Vecteezy API",
+        headers={"Authorization": f"Bearer {token}"})
+    with req as r:
+        return json.loads(r.read(MAX_METADATA_BYTES + 1))
+
+
 def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
     src = source(src_key)
     if not query.strip() or not 1 <= limit <= 50:
@@ -230,7 +261,7 @@ def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
         raise ValueError(f"{src.key} has no search API; paste its page URL into source-import")
     keys = _api_keys()
     key = keys.get(src.api_key_name)
-    if not key:
+    if src.key != "vecteezy" and not key:
         raise ValueError(f"missing {src.api_key_name} key in secrets/sources.json")
     q = urllib.parse.quote_plus(query)
     if src.key == "pixabay":
@@ -252,6 +283,20 @@ def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
                  "duration": v.get("duration"), "page": v.get("url"),
                  "user": (v.get("user") or {}).get("name")}
                 for v in data.get("videos", [])]
+    if src.key == "vecteezy":
+        acct, token = _vecteezy_creds(keys)
+        req = net.bounded_request(
+            f"https://api.vecteezy.com/v2/{acct}/resources?term={q}"
+            f"&content_type=video&per_page={limit}",
+            {"api.vecteezy.com"}, name="Vecteezy API",
+            headers={"Authorization": f"Bearer {token}"})
+        with req as r:
+            data = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        items = data.get("resources") or data.get("data") or []
+        return [{"ref": str(i["id"]), "title": i.get("title", ""),
+                 "page": i.get("page_url") or f"https://www.vecteezy.com/video/{i['id']}",
+                 "user": i.get("contributor_name")}
+                for i in items]
     if src.key == "coverr":
         req = net.bounded_request(
             f"https://api.coverr.co/videos?query={q}&page_size={limit}",
@@ -269,6 +314,19 @@ def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
 def _api_import(conn: sqlite3.Connection, src: Source, ref: str, species: str, cache: Path) -> str:
     keys = _api_keys()
     key = keys.get(src.api_key_name)
+    if src.key == "vecteezy":
+        acct, token = _vecteezy_creds(keys)
+        detail = _vecteezy_get(acct, token, f"/resources/{urllib.parse.quote_plus(ref)}")
+        res = detail.get("resource", detail)
+        dl = _vecteezy_get(acct, token, f"/resources/{urllib.parse.quote_plus(ref)}/download")
+        media_url = dl.get("url")
+        if not media_url:
+            raise ValueError("Vecteezy returned no download URL")
+        title = res.get("title") or f"Vecteezy video {ref}"
+        page = res.get("page_url") or f"https://www.vecteezy.com/video/{ref}"
+        creator = (res.get("contributor_name") or res.get("contributor") or "Vecteezy")
+        return _finish_import(conn, src, tmp_path=_download(media_url, cache), cache=cache,
+                              title=title, page=page, creator=creator, species=species)
     if not key:
         raise ValueError(f"missing {src.api_key_name} key in secrets/sources.json")
     if src.key == "pixabay":
