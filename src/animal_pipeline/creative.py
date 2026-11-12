@@ -152,7 +152,10 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
                          "limits.max_shot_s, shots on the same asset must not overlap, and the "
                          "whole script must read within narration.estimated_max_words words. "
                          "Segment text is spoken aloud: write measurements in words "
-                         "('8 centimeters'), never abbreviations ('8 cm').",
+                         "('8 centimeters'), never abbreviations ('8 cm'). Each segment may "
+                         "set focus_x (0-1 horizontal crop center) and zoom (0.2-1.0); "
+                         "prefer zoom around 0.8 for wide landscape clips so the subject "
+                         "fills a blurred-pad frame, which reads better on mobile.",
                          "topic": dict(topic), "facts": facts,
                          "footage_budget": footage})
     req = urllib.request.Request(config["base_url"].rstrip("/") + "/api/generate",
