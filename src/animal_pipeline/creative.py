@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from .budget import footage_budget, select_profile, species_match
+from .budget import footage_budget, full_frame_fraction, select_profile, species_match
 from .core import canonical_hash, new_id, now, settings
 from .evidence import validate_segments
 from .media import rights_errors
@@ -151,11 +151,26 @@ def generate_plan(conn: sqlite3.Connection, topic_id: str) -> dict:
                          "duration_s <= that asset's duration) and stay under "
                          "limits.max_shot_s, shots on the same asset must not overlap, and the "
                          "whole script must read within narration.estimated_max_words words. "
+                         "HOOK RULE (retention): roughly 4 in 5 viewers swipe away in the "
+                         "first seconds, so segment order must open on the single most "
+                         "striking mid-action clip available — never a wide establishing "
+                         "shot or slow moment — and the first segment's text must be one "
+                         "short line (about 10 words) that states the curiosity hook "
+                         "directly as a question or surprising claim with no warm-up. "
                          "Segment text is spoken aloud: write measurements in words "
                          "('8 centimeters'), never abbreviations ('8 cm'). Each segment may "
                          "set focus_x (0-1 horizontal crop center) and zoom (0.2-1.0); "
-                         "prefer zoom around 0.8 for wide landscape clips so the subject "
-                         "fills a blurred-pad frame, which reads better on mobile.",
+                         "target zoom=1 for roughly 15-35% of story time ONLY when the "
+                         "subject stays sharp and centered after 9:16 cover-cropping. "
+                         "You cannot inspect the actual frames, so never mark "
+                         "full_frame_focus_ok=true or thumbnail_candidate=true based on "
+                         "filenames; leave those fields for visual inspection. "
+                         "When no sharp cover crop is known, prefer zoom around 0.8 "
+                         "with a blurred background and provide "
+                         "full_frame_unavailable_reason when there is no full-frame shot "
+                         "or full_frame_exception_reason if >35% of footage genuinely "
+                         "needs full-frame coverage. These are editorial targets, not "
+                         "claims of measured retention uplift.",
                          "topic": dict(topic), "facts": facts,
                          "footage_budget": footage})
     req = urllib.request.Request(config["base_url"].rstrip("/") + "/api/generate",
@@ -187,7 +202,32 @@ def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False,
     total_s = sum(float(s.get("duration_s", 0)) for s in segments)
     if total_s > footage["limits"]["max_total_s"] + 0.05:
         errors.append("plan exceeds usable footage budget")
+    if not simulation:
+        render_cfg = settings()["render"]
+        if total_s + render_cfg["branding_outro_s"] > render_cfg["max_duration_s"] + 0.05:
+            errors.append("plan plus brand outro exceeds maximum duration")
+        cover_fraction = full_frame_fraction(segments)
+        if any("zoom" in shot for shot in segments):
+            if cover_fraction < 0.15 and len(plan.get("full_frame_unavailable_reason", "").strip()) < 15:
+                errors.append("explain why no focused full-frame footage reaches the 15% target")
+            if cover_fraction >= 0.15 and not any(
+                    shot.get("full_frame_focus_ok") is True for shot in segments):
+                errors.append("visually verify a focused full-frame shot before using zoom=1")
+            if cover_fraction > 0.35 and len(plan.get("full_frame_exception_reason", "").strip()) < 15:
+                errors.append("explain why focused full-frame footage exceeds the 35% target")
     for segment in segments:
+        if segment.get("full_frame_focus_ok") is not None:
+            if not isinstance(segment["full_frame_focus_ok"], bool):
+                errors.append("full_frame_focus_ok must be a boolean")
+            elif segment["full_frame_focus_ok"] and float(segment.get("zoom", 1)) < 0.999:
+                errors.append("verified full-frame focus requires zoom=1")
+        if "thumbnail_candidate" in segment and not isinstance(segment["thumbnail_candidate"], bool):
+            errors.append("thumbnail_candidate must be a boolean")
+        if "thumbnail_at_s" in segment:
+            at = float(segment["thumbnail_at_s"])
+            if not (float(segment["start_s"]) <= at <
+                    float(segment["start_s"]) + float(segment["duration_s"])):
+                errors.append("thumbnail_at_s must fall within its shot")
         asset = conn.execute("SELECT * FROM assets WHERE id=?", (segment.get("asset_id"),)).fetchone()
         if not asset or not species_match(topic["species"], asset["species"]):
             errors.append("missing or wrong-species footage")
@@ -204,7 +244,10 @@ def save_plan(conn: sqlite3.Connection, plan: dict, *, simulation: bool = False,
     rev = conn.execute("SELECT COALESCE(MAX(revision),0)+1 FROM plans WHERE topic_id=?",
                        (topic_id,)).fetchone()[0]
     plan_id = new_id("plan")
-    plan = {**plan, "footage_profile": {"profile": footage["profile"],
+    plan = {**plan, "visual_mix": {"full_frame_fraction": round(full_frame_fraction(segments), 3),
+                                  "target_fraction": [0.15, 0.35],
+                                  "focus_requires_visual_review": True},
+            "footage_profile": {"profile": footage["profile"],
                                         "target_s": footage["target_s"],
                                         "usable_s": footage["total_usable_s"],
                                         "reason": footage["reason"]}}
