@@ -139,7 +139,21 @@ def test_commons_rejects_wrong_license_url(tmp_path, monkeypatch, license_url):
     conn.close()
 
 
-def test_commons_search_lists_video_titles_without_download(monkeypatch):
+def test_pd_name_only_accepts_commons_file_page():
+    assert commons._license_url_ok(
+        "Public domain", "https://commons.wikimedia.org/wiki/File:x.ogv")
+    assert commons._license_url_ok(
+        "PDM", "https://commons.wikimedia.org/wiki/File:x.ogv")
+    assert not commons._license_url_ok(
+        "Public domain", "https://evil.example.com/wiki/File:x")
+    assert not commons._license_url_ok(
+        "Public domain", "https://commons.wikimedia.org/wiki/Category:x")
+    assert not commons._license_url_ok(
+        "CC BY 4.0", "https://commons.wikimedia.org/wiki/File:x")
+
+
+def test_commons_search_lists_video_titles_without_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(commons.sources, "ROOT", tmp_path)
     payload = json.dumps({"query": {"search": [
         {"title": "File:Octopus.ogv"}, {"title": "File:Octopus.ogv"},
         {"title": "File:Octopus.jpg"}]}}).encode()
@@ -147,6 +161,7 @@ def test_commons_search_lists_video_titles_without_download(monkeypatch):
         assert "filetype%3Avideo" in url or "filetype:video" in url
         return Response(payload, url)
     monkeypatch.setattr(commons, "_open", open_response)
+    assert commons.search("Octopus cyanea") == ["File:Octopus.ogv"]
     assert commons.search("Octopus cyanea") == ["File:Octopus.ogv"]
 
 

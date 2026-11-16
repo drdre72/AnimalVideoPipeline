@@ -141,8 +141,12 @@ def sync_uploads(conn: sqlite3.Connection, *, token: str | None = None,
              _seconds(video["contentDetails"]["duration"]), now()))
         imported += cursor.rowcount
         stats = video.get("statistics", {})
-        conn.execute("INSERT OR IGNORE INTO analytics(id,video_id,platform,observed_at,published_at,views,likes,watch_seconds,completion,source,comments,subscribers,shares) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO analytics(id,video_id,platform,observed_at,published_at,views,likes,watch_seconds,completion,source,comments,subscribers,shares) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                     "ON CONFLICT(video_id,platform,observed_at) DO UPDATE SET "
+                     "views=excluded.views,likes=excluded.likes,comments=excluded.comments,"
+                     "source=CASE WHEN analytics.watch_seconds IS NOT NULL "
+                     "THEN 'youtube_data_api+youtube_analytics_api' ELSE excluded.source END",
                      (new_id("snapshot"), video_id, "youtube", _snapshot_day(),
                       video["snippet"]["publishedAt"], int(stats.get("viewCount", 0)),
                       stats.get("likeCount"), None, None, "youtube_data_api",
@@ -180,8 +184,13 @@ def sync_analytics(conn: sqlite3.Connection, *, token: str | None = None,
             continue
         avg, duration = row.get("averageViewDuration"), durations.get(video_id)
         completion = (avg / duration) if avg and duration else None
-        conn.execute("INSERT OR IGNORE INTO analytics(id,video_id,platform,observed_at,published_at,views,likes,watch_seconds,completion,source,comments,subscribers,shares) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO analytics(id,video_id,platform,observed_at,published_at,views,likes,watch_seconds,completion,source,comments,subscribers,shares) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                     "ON CONFLICT(video_id,platform,observed_at) DO UPDATE SET "
+                     "watch_seconds=excluded.watch_seconds,completion=excluded.completion,"
+                     "subscribers=excluded.subscribers,shares=excluded.shares,"
+                     "source=CASE WHEN analytics.source LIKE '%youtube_data_api%' "
+                     "THEN 'youtube_data_api+youtube_analytics_api' ELSE excluded.source END",
                      (new_id("snapshot"), video_id, "youtube", end,
                       published.get(video_id, "1970-01-01T00:00:00Z"),
                       int(row.get("views", 0)), row.get("likes"),

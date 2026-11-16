@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS assets (
  modifications INTEGER NOT NULL, restrictions TEXT NOT NULL DEFAULT '',
  expires_at TEXT, approved INTEGER NOT NULL DEFAULT 0, test_only INTEGER NOT NULL DEFAULT 0,
  species TEXT NOT NULL, behavior TEXT NOT NULL DEFAULT '', duration REAL NOT NULL,
- width INTEGER NOT NULL, height INTEGER NOT NULL, created_at TEXT NOT NULL
+ width INTEGER NOT NULL, height INTEGER NOT NULL, created_at TEXT NOT NULL,
+ rejected INTEGER NOT NULL DEFAULT 0, rejection_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS plans (
  id TEXT PRIMARY KEY, topic_id TEXT NOT NULL REFERENCES topics(id),
@@ -118,6 +119,11 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     if "claimed_at" not in {row["name"] for row in
                           conn.execute("PRAGMA table_info(jobs)")}:
         conn.execute("ALTER TABLE jobs ADD COLUMN claimed_at TEXT")
+    asset_cols = {row["name"] for row in conn.execute("PRAGMA table_info(assets)")}
+    if "rejected" not in asset_cols:
+        conn.execute("ALTER TABLE assets ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0")
+    if "rejection_reason" not in asset_cols:
+        conn.execute("ALTER TABLE assets ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''")
     analytics_cols = {row["name"] for row in conn.execute("PRAGMA table_info(analytics)")}
     for column in ("comments", "subscribers", "shares"):
         if column not in analytics_cols:

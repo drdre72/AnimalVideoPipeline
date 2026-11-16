@@ -29,12 +29,17 @@ def import_snapshots(conn: sqlite3.Connection, path: Path) -> int:
     return count
 
 
+def _naive(ts: str) -> datetime:
+    dt = datetime.fromisoformat(ts)
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
 def report(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute("SELECT * FROM analytics ORDER BY observed_at").fetchall()
     result = []
     for row in rows:
-        age = (datetime.fromisoformat(row["observed_at"]) -
-               datetime.fromisoformat(row["published_at"])).total_seconds() / 86400
+        age = (_naive(row["observed_at"]) -
+               _naive(row["published_at"])).total_seconds() / 86400
         result.append({"video_id": row["video_id"], "platform": row["platform"],
                        "age_days": round(age, 2),
                        "views_per_day": round(row["views"] / max(age, 1), 2),

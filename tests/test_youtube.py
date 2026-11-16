@@ -161,6 +161,27 @@ def test_sync_analytics_records_metrics_and_unsupported(conn, monkeypatch):
     assert "impressions" in result["unsupported_fields"]
 
 
+def test_same_day_analytics_enriches_upload_snapshot(conn, monkeypatch):
+    monkeypatch.setattr(google_auth, "verify_identity",
+                        lambda: {"id": "CH1", "title": "Naminal Hub"})
+    youtube.sync_uploads(conn, token="t", request=_youtube_router())
+
+    def analytics_response(url, hosts, **kw):
+        return Response({"columnHeaders": [{"name": n} for n in
+                         ("video", "views", "estimatedMinutesWatched",
+                          "averageViewDuration", "likes", "subscribersGained", "shares")],
+                         "rows": [["VID1", 80, 4, 48.0, 8, 2, 3]]})
+
+    youtube.sync_analytics(conn, token="t", request=analytics_response)
+    row = conn.execute("SELECT views,watch_seconds,completion,comments,shares,source "
+                       "FROM analytics WHERE video_id='VID1'").fetchone()
+    assert row[:] == (100, 240.0, pytest.approx(48 / 62), 3, 3,
+                      "youtube_data_api+youtube_analytics_api")
+    youtube.sync_uploads(conn, token="t", request=_youtube_router())
+    assert conn.execute("SELECT count(*) FROM analytics WHERE video_id='VID1'").fetchone()[0] == 1
+    assert conn.execute("SELECT watch_seconds FROM analytics WHERE video_id='VID1'").fetchone()[0] == 240.0
+
+
 def test_quota_and_network_failures_are_bounded(conn, monkeypatch):
     monkeypatch.setattr(google_auth, "verify_identity",
                         lambda: {"id": "CH1", "title": "Naminal Hub"})
@@ -208,12 +229,12 @@ def _approved_plan(conn, footage):
 
 
 @pytest.fixture
-def footage(tmp_path):
+def footage(tmp_path, h264_enc):
     import subprocess
     path = tmp_path / "f.mp4"
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=3",
-                    "-c:v", "h264_videotoolbox", "-b:v", "1M", str(path)],
+                    "-c:v", h264_enc, "-b:v", "1M", str(path)],
                    check=True, timeout=60)
     return path
 

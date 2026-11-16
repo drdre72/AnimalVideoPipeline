@@ -7,7 +7,10 @@ requires-python = ">=3.11"
 dependencies = ["pyyaml>=6.0.1", "pillow>=10.4.0", "yt-dlp>=2026.10.26"]
 
 [project.optional-dependencies]
-tts = ["mlx-audio>=0.2.0", "misaki[en]>=0.9.4"]
+tts = ["mlx-audio>=0.2.0; sys_platform == 'darwin'",
+       "misaki[en]>=0.9.4; sys_platform == 'darwin'",
+       "kokoro-onnx>=0.4.0",
+       "soundfile>=0.13.0"]
 dev = ["pytest>=8.3.0"]
 
 [project.scripts]

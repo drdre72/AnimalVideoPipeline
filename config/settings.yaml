@@ -54,14 +54,18 @@ render:
   height: 1920
   fps: 30
   encoder: h264_videotoolbox
+  branding_outro_s: 2.0
   min_duration_s: 61
   max_duration_s: 70
   exception_min_duration_s: 15
   loudness_target: -14
   loudness_tolerance: 1.5
 voice:
-  backend: kokoro_mlx
-  model: mlx-community/Kokoro-82M-bf16
+  backend: kokoro_onnx      # kokoro_onnx runs everywhere; kokoro_mlx is the
+                            # Apple Silicon alternative (model then takes the
+                            # HF repo id, e.g. mlx-community/Kokoro-82M-bf16)
+  model: models/kokoro-v1.0.onnx
+  voices_file: models/voices-v1.0.bin
   approved: true
   name: af_bella
   strict: true
@@ -71,3 +75,7 @@ alignment:
 llm:
   model: qwen3:8b
   base_url: http://127.0.0.1:11434
+vecteezy:
+  budget_verified: true
+  tier: free
+  note: "Operator confirms production budget is under the $1,000 free-tier limit."

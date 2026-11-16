@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .budget import footage_budget
+from .budget import footage_budget, full_frame_fraction
 from .core import ROOT, connect, settings
 from .creative import rank_topics
 from .report import weekly
@@ -88,6 +88,8 @@ def review_page(conn: sqlite3.Connection, plan_id: str) -> str:
     body = (f"<h2>{_esc(plan.get('title', row['species']))}</h2>"
             f"<p><span class='badge'>{_esc(row['status'])}</span> "
             f"rev {_esc(row['revision'])} · <code>{_esc(row['video_hash'] or 'no video')}</code></p>"
+            f"<p>Full-frame story coverage: {full_frame_fraction(plan.get('segments', [])):.0%}"
+            " (target 15-35% when focused; operator checks crop and cover image).</p>"
             f"{video}<h3>Blocking checks</h3><ul>{errors or '<li>none</li>'}</ul>{action}"
             f"<h3>Script</h3><ul>{script}</ul><h3>Description</h3>"
             f"<p>{_esc(plan.get('description', ''))}</p><h3>Manifest</h3><pre>{_esc(manifest)}</pre>")
@@ -101,7 +103,7 @@ def triage_page(conn: sqlite3.Connection) -> str:
         "WHERE f.status='proposed' ORDER BY f.created_at").fetchall()
     assets = conn.execute(
         "SELECT id,species,creator,license_type,source_ref,duration FROM assets "
-        "WHERE approved=0 ORDER BY created_at").fetchall()
+        "WHERE approved=0 AND rejected=0 ORDER BY created_at").fetchall()
     fact_rows = "".join(
         f"<tr><td>{_esc(f['species'])}</td><td>{_esc(f['statement'])}</td>"
         f"<td>{_esc(f['organization'])}</td></tr>"

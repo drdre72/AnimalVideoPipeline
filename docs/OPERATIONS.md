@@ -32,6 +32,19 @@ For footage shorter than the default 61-second target, `draft <plan.json>
 an explicit editorial exception for a 15–70-second Short. This does not
 bypass fact, rights, captions, audio, QC or exact-revision review.
 
+New plans target 15-35% focused full-frame cover-crops (`zoom=1`) when the
+animal remains sharp at 9:16; verify those windows in source footage and set
+`full_frame_focus_ok=true` on the segment. Otherwise use a mobile-friendly
+blurred pull-back (`zoom` around 0.8) and include
+`full_frame_unavailable_reason`. More than 35% full-frame requires
+`full_frame_exception_reason`. `thumbnail_candidate=true` and optional
+`thumbnail_at_s` pick a verified source frame for the cover photo. Export
+always generates a full-bleed 1080x1920 JPEG from the chosen source, even
+when the video has no cover shot, and records whether that frame appears
+full-screen in the video. Operator review of focus/species remains required.
+See `docs/SOURCE_PRIORITY.md` for the ordered, rights-aware source shortlist
+and API search etiquette.
+
 Before any plan call, `budget.footage_budget` computes a deterministic
 contract: which rights-cleared assets verify the topic's species (exact tag,
 or a more specific tag inside a configured `taxonomy` family — a generic
@@ -69,6 +82,18 @@ Production renders normalize narration toward `render.loudness_target`
 `render.loudness_tolerance`. A narration track needing more than the cap
 fails before encoding; a render drifting outside the band fails QC.
 
+Production renders finish with a 2-second black end card: the circular
+Naminal logo (a rights-owned snapshot of the configured YouTube channel
+avatar in `config/branding/naminal-logo.png`) fades in above a pulsing yellow
+"Like & Subscribe" / "for more" callout. A locally synthesized D5-F5-D6
+triplet plays as the card appears. Captions and narration end with the
+wildlife footage; the notes play on the card only. The full video must
+fit the 70-second output limit. Simulations do not contain the branding
+card. The render manifest records the logo hash and card duration.
+Already approved or exported revisions cannot be rerendered; create a
+new plan revision and pass QC and operator review again to update an older
+cut. Previously exported videos and manual uploads are unchanged.
+
 `research-search` and `research-propose <topic_id> <title>` use the official
 Wikipedia API over the same bounded-HTTPS boundary as Commons (`--allow-network`
 required). `research-propose` fetches only the article's plain-text intro,
@@ -78,7 +103,8 @@ requires `verify-fact` per fact, and `reject-fact` disposes of the rest. The
 operator verifies the excerpt and its underlying citation — Wikipedia is a
 finding aid, not an authority.
 
-`services install|status|uninstall` manages a single LaunchAgent,
+`services install|status|uninstall` (macOS only — the commands refuse on
+other platforms) manages a single LaunchAgent,
 `ai.naminal.desk`, that runs `main.py run --limit <service.run_limit>` every
 `service.interval_s` seconds under the project `.venv`. It is operator
 install only, `RunAtLoad` is off, output goes to `output/logs/`, and the
@@ -97,10 +123,13 @@ agent, competitor imports). A missing optional component never fails the
 check; a missing required one does.
 
 Narration runs through a resident Kokoro worker
-(`python -m animal_pipeline.kokoro_worker`): the model loads once per
-process instead of per render, a dead worker respawns once, and the
-per-call CLI remains the cold fallback. First synthesis includes the
-model load; subsequent ones are an order of magnitude faster.
+(`python -m animal_pipeline.kokoro_worker` for the Apple Silicon `kokoro_mlx`
+backend, or `kokoro_onnx_worker` for the portable `kokoro_onnx` default):
+the model loads once per process instead of per render, a dead worker
+respawns once, and the per-call CLI remains the cold fallback. First
+synthesis includes the model load; subsequent ones are an order of
+magnitude faster. `kokoro_onnx` is the shipped default because it runs on
+Windows, Linux and macOS and holds the 82M model in ~350 MB of RAM.
 
 `youtube` subcommands provide the read-only connector:
 

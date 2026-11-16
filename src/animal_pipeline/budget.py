@@ -15,6 +15,14 @@ from .media import rights_errors
 PROFILES = ("NEEDS_MEDIA", "MICRO", "STANDARD", "EXTENDED")
 
 
+def full_frame_fraction(segments: list[dict]) -> float:
+    total = sum(float(shot["duration_s"]) for shot in segments)
+    if not total:
+        return 0.0
+    return sum(float(shot["duration_s"]) for shot in segments
+               if float(shot.get("zoom", 1.0)) >= 0.999) / total
+
+
 def species_match(topic_species: str, asset_species: str) -> str | None:
     if asset_species == topic_species:
         return "exact"

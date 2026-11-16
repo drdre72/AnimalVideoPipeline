@@ -11,7 +11,30 @@ from .audio import align, synthesize, write_srt
 from .budget import species_match
 from .core import ROOT, digest, settings
 from .evidence import validate_segments
-from .media import probe, rights_errors
+from .media import h264_encoder, probe, rights_errors
+
+BRAND_LOGO = Path(__file__).resolve().parents[2] / "config/branding/naminal-logo.png"
+_BRAND_FONT_CANDIDATES = (
+    Path("/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf"),
+    Path("C:/Windows/Fonts/arialbd.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+)
+
+
+def brand_font() -> Path:
+    bundled = sorted(BRAND_LOGO.parent.glob("*.ttf")) + sorted(BRAND_LOGO.parent.glob("*.otf"))
+    for candidate in (*bundled, *_BRAND_FONT_CANDIDATES):
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError("brand font not found; place a .ttf/.otf in config/branding/")
+
+
+def _font_arg(path: Path) -> str:
+    """ffmpeg filter values treat ':' as a separator, so Windows drive
+    letters need escaping even inside quotes."""
+    return str(path).replace("\\", "/").replace(":", "\\:")
+BRAND_NOTES = ((587.33, 0.26, 0.14), (698.46, 0.26, 0.32), (1174.66, 0.50, 0.50))
+BRAND_NOTE_VOLUME = 1.6
 
 
 def digest_statements(text: str) -> str:
@@ -27,12 +50,7 @@ def _ffmpeg(args: list[str]) -> None:
 
 
 def _encoder() -> str:
-    encoder = settings()["render"]["encoder"]
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                            capture_output=True, text=True, timeout=30)
-    if encoder not in result.stdout:
-        raise RuntimeError(f"required encoder unavailable: {encoder}")
-    return encoder
+    return h264_encoder(settings()["render"].get("encoder"))
 
 
 def plan_min_duration(plan: dict, cfg: dict) -> float:
@@ -81,6 +99,8 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
     row = conn.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
     if not row:
         raise ValueError("unknown plan")
+    if row["status"] in ("APPROVED", "EXPORTED"):
+        raise ValueError("approved revision is immutable; draft a new revision before rendering")
     plan = json.loads(row["content"])
     errors = validate_segments(conn, row["topic_id"], plan["segments"])
     if simulation and not narration:
@@ -104,10 +124,20 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
                 errors.append(str(exc))
         clips.append(asset)
     cfg = settings()["render"]
-    duration = sum(float(s["duration_s"]) for s in plan["segments"])
+    story_duration = sum(float(s["duration_s"]) for s in plan["segments"])
+    outro_duration = 0.0 if simulation else float(cfg["branding_outro_s"])
+    duration = story_duration + outro_duration
     min_duration = plan_min_duration(plan, cfg)
-    if not simulation and not min_duration <= duration <= cfg["max_duration_s"]:
+    if not simulation and not (min_duration <= story_duration and
+                               duration <= cfg["max_duration_s"]):
         errors.append("duration outside approved production range")
+    if outro_duration and not BRAND_LOGO.is_file():
+        errors.append("missing bundled Naminal brand logo")
+    if outro_duration:
+        try:
+            font = brand_font()
+        except RuntimeError:
+            errors.append("no usable brand font (bundle a .ttf/.otf in config/branding/)")
     if errors:
         raise ValueError("; ".join(sorted(set(errors))))
     width, height, fps = cfg["width"], cfg["height"], cfg["fps"]
@@ -156,13 +186,54 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
                    f"concat=n={len(clips)}:v=1:a=0[raw]")
     if captions:
         subtitle_path = str(output_dir / "captions.srt").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        filters.append(f"[raw]subtitles='{subtitle_path}':force_style='Alignment=2,MarginV=55,FontSize=12,Outline=2'[v]")
+        filters.append(f"[raw]subtitles='{subtitle_path}':force_style='Alignment=2,MarginV=55,FontSize=12,Outline=2'[story]")
     else:
-        filters.append("[raw]null[v]")
+        filters.append("[raw]null[story]")
+    if outro_duration:
+        args += ["-loop", "1", "-framerate", str(fps), "-t", str(outro_duration),
+                 "-i", str(BRAND_LOGO), "-f", "lavfi", "-i",
+                 f"color=c=black:s={width}x{height}:r={fps}:d={outro_duration}"]
+        for frequency, note_duration, _ in BRAND_NOTES:
+            args += ["-f", "lavfi", "-i", f"sine=frequency={frequency}:"
+                     f"sample_rate=48000:duration={note_duration}"]
+        logo_width = int(width * 0.57)
+        label_top = (height + logo_width) // 2 + 30
+        pulse = "0.74+0.26*cos(2*PI*2*(t-0.14))"
+        filters.append(
+            f"[{len(clips)+1}:v]format=rgba,scale={logo_width}:{logo_width}:flags=lanczos,"
+            "fade=t=in:st=0:d=0.14:alpha=1[logo];"
+            f"[{len(clips)+2}:v][logo]overlay=(W-w)/2:(H-h)/2:shortest=1,"
+            f"drawtext=fontfile='{_font_arg(font)}':text='Like & Subscribe':"
+            f"fontcolor=0xFFD34D:fontsize=60:alpha='{pulse}':"
+            f"x=(w-text_w)/2:y={label_top},"
+            f"drawtext=fontfile='{_font_arg(font)}':text='for more':"
+            f"fontcolor=0xFFD34D:fontsize=52:alpha='{pulse}':"
+            f"x=(w-text_w)/2:y={label_top + 72},"
+            f"format=yuv420p,trim=duration={outro_duration},setpts=PTS-STARTPTS[outro]")
+        filters.append("[story][outro]concat=n=2:v=1:a=0[v]")
+    else:
+        filters.append("[story]null[v]")
     loudness_chain = (f",volume={gain_db:.2f}dB,alimiter=limit=0.891:level=false"
                       if not simulation else "")
-    filters.append(f"[{len(clips)}:a]atrim=duration={duration:.3f},"
-                   f"apad=whole_dur={duration:.3f},asetpts=PTS-STARTPTS{loudness_chain}[a]")
+    if outro_duration:
+        filters.append(f"[{len(clips)}:a]atrim=duration={story_duration:.3f},"
+                       f"apad=whole_dur={duration:.3f},asetpts=PTS-STARTPTS"
+                       f"{loudness_chain}[voice]")
+        for i, (_, note_duration, offset) in enumerate(BRAND_NOTES):
+            echo = ",aecho=0.8:0.35:140:0.4" if i == 2 else ""
+            filters.append(
+                f"[{len(clips)+3+i}:a]afade=t=in:st=0:d=0.01,"
+                f"afade=t=out:st={0.08 if i < 2 else 0.12}:"
+                f"d={note_duration - (0.08 if i < 2 else 0.12):.2f}"
+                f"{echo},volume={BRAND_NOTE_VOLUME},"
+                f"adelay={round((story_duration + offset) * 1000)}:all=1[note{i}]")
+        filters.append(
+            "[voice][note0][note1][note2]"
+            "amix=inputs=4:duration=longest:normalize=0,"
+            f"atrim=duration={duration:.3f},alimiter=limit=0.891:level=false[a]")
+    else:
+        filters.append(f"[{len(clips)}:a]atrim=duration={duration:.3f},"
+                       f"apad=whole_dur={duration:.3f},asetpts=PTS-STARTPTS{loudness_chain}[a]")
     args += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
              "-c:v", _encoder(), "-b:v", "8M", "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-b:a", "160k", "-t", f"{duration:.3f}",
@@ -192,14 +263,18 @@ def compose(conn: sqlite3.Connection, plan_id: str, narration: Path | None = Non
                      "license": a["license_type"], "evidence": a["evidence"],
                      "attribution": a["attribution"]} for a in clips],
                 "facts": list({fid for s in plan["segments"] for fid in s["fact_ids"]}),
-                "duration": result["duration"], "test_only": simulation,
+                "duration": result["duration"], "story_duration": story_duration,
+                "branding": ({"logo_sha256": digest(BRAND_LOGO),
+                              "outro_s": outro_duration,
+                              "sound": "locally synthesized D5-F5-D6 triplet"} if outro_duration else None),
+                "test_only": simulation,
                 "runtime_exception": plan.get("runtime_exception"),
                 "voice": settings()["voice"] if not simulation else {"backend": "test_only"}}
     audio_duration = float(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(narration)],
         capture_output=True, text=True, check=True, timeout=60).stdout.strip())
-    audio_timing = simulation or audio_timing_ok(duration, audio_duration)
+    audio_timing = simulation or audio_timing_ok(story_duration, audio_duration)
     if not simulation:
         black = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(out),
                                 "-vf", "blackdetect=d=0.5:pix_th=0.10",

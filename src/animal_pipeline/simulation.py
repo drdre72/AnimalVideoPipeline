@@ -6,7 +6,7 @@ from .core import ROOT, connect
 from .creative import save_plan
 from .editor import compose
 from .evidence import add_fact, add_topic, approve_fact
-from .media import approve_asset, import_asset
+from .media import approve_asset, h264_encoder, import_asset
 
 
 def demo() -> dict:
@@ -17,7 +17,7 @@ def demo() -> dict:
     if not video.exists():
         subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                         "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=3",
-                        "-c:v", "h264_videotoolbox", "-b:v", "2M", str(video)],
+                        "-c:v", h264_encoder(), "-b:v", "2M", str(video)],
                        check=True, timeout=90)
     if not audio.exists():
         subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",

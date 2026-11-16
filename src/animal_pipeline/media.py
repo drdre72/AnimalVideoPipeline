@@ -10,7 +10,23 @@ from pathlib import Path
 
 from PIL import Image
 
-from .core import digest, new_id, now
+from .core import digest, new_id, now, settings, transaction
+
+_H264_ENCODERS = ("h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264")
+
+
+def h264_encoder(preferred: str | None = None) -> str:
+    """Pick a usable H.264 encoder from the local ffmpeg build. The configured
+    encoder wins when present; otherwise prefer hardware encoders and fall
+    back to libx264, which every stock ffmpeg ships."""
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                              capture_output=True, text=True, timeout=30).stdout
+    if preferred and preferred in encoders:
+        return preferred
+    for candidate in _H264_ENCODERS:
+        if candidate in encoders:
+            return candidate
+    raise RuntimeError("no H.264 encoder found in this ffmpeg build")
 
 
 def probe(path: Path) -> dict:
@@ -38,7 +54,10 @@ def import_asset(conn: sqlite3.Connection, path: Path, *, source_ref: str, creat
         raise ValueError("missing item-specific rights or species evidence")
     info = probe(path)
     asset_id = new_id("asset")
-    conn.execute("INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO assets (id,path,sha256,source_ref,creator,license_type,"
+                 "evidence,attribution,commercial,modifications,restrictions,expires_at,"
+                 "approved,test_only,species,behavior,duration,width,height,created_at) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (asset_id, str(path.resolve()), digest(path), source_ref, creator, license_type,
                   evidence, attribution, int(commercial), int(modifications), restrictions,
                   expires_at, 0, int(test_only), species, behavior, info["duration"],
@@ -48,6 +67,8 @@ def import_asset(conn: sqlite3.Connection, path: Path, *, source_ref: str, creat
 
 def rights_errors(asset: sqlite3.Row, *, publishable: bool = True) -> list[str]:
     errors = []
+    if asset["rejected"]:
+        errors.append("asset rejected: " + asset["rejection_reason"])
     if not asset["approved"]:
         errors.append("asset rights not approved")
     if not asset["commercial"] or not asset["modifications"]:
@@ -66,6 +87,9 @@ def rights_errors(asset: sqlite3.Row, *, publishable: bool = True) -> list[str]:
             errors.append("invalid rights expiry")
     if asset["restrictions"]:
         errors.append("unresolved platform restrictions")
+    if asset["license_type"] == "Vecteezy License (free tier)":
+        if not settings().get("vecteezy", {}).get("budget_verified"):
+            errors.append("Vecteezy free-tier production budget not verified")
     if publishable and asset["test_only"]:
         errors.append("test footage cannot be published")
     path = Path(asset["path"])
@@ -85,6 +109,17 @@ def approve_asset(conn: sqlite3.Connection, asset_id: str) -> None:
     conn.execute("UPDATE assets SET approved=1 WHERE id=?", (asset_id,))
 
 
+def reject_asset(conn: sqlite3.Connection, asset_id: str, reason: str) -> None:
+    if not reason.strip():
+        raise ValueError("rejection requires a reason")
+    with transaction(conn):
+        row = conn.execute("SELECT approved,rejected FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not row or row["approved"] or row["rejected"]:
+            raise ValueError("only an unapproved asset can be rejected")
+        conn.execute("UPDATE assets SET rejected=1,rejection_reason=? WHERE id=?",
+                     (reason.strip(), asset_id))
+
+
 def playable_preview(asset: sqlite3.Row, cache: Path) -> Path:
     out = cache / f"{asset['id']}_playable.mp4"
     if out.is_file():
@@ -94,9 +129,7 @@ def playable_preview(asset: sqlite3.Row, cache: Path) -> Path:
         except ValueError:
             pass
     tmp = cache / f"{asset['id']}_playable.part.mp4"
-    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                              capture_output=True, text=True, timeout=30)
-    encoder = "h264_videotoolbox" if "h264_videotoolbox" in encoders.stdout else "libx264"
+    encoder = h264_encoder()
     args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", asset["path"],
             "-map", "0:v:0", "-map", "0:a:0?", "-c:v", encoder, "-pix_fmt", "yuv420p",
             "-b:v", "4M", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)]

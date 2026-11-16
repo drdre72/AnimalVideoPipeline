@@ -4,11 +4,12 @@ import atexit
 import glob
 import json
 import os
+import queue
 import re
-import select
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from .core import new_id, settings
@@ -16,15 +17,24 @@ from .core import new_id, settings
 _READ_TIMEOUT_S = 300
 
 
+def _pump(stream, lines: "queue.Queue") -> None:
+    """Drain worker stdout onto a queue so reads can time out. A thread is
+    portable; select() only accepts sockets on Windows."""
+    for line in stream:
+        lines.put(line)
+    lines.put(None)
+
+
 class _KokoroWorker:
-    """One resident mlx_audio process per model — the model loads once at
-    spawn and serves every render after. A dead worker respawns once;
+    """One resident TTS process per model — the model loads once at spawn
+    and serves every render after. A dead worker respawns once;
     synthesize() falls back to the per-call CLI beyond that."""
 
     def __init__(self, model: str, command: list[str] | None = None):
         self.model = model
         self._command = command
         self._proc: subprocess.Popen | None = None
+        self._lines: "queue.Queue | None" = None
 
     def _spawn(self) -> None:
         src = Path(__file__).resolve().parents[1]
@@ -36,6 +46,9 @@ class _KokoroWorker:
                               "--model", self.model],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env=env, text=True)
+        self._lines = queue.Queue()
+        threading.Thread(target=_pump, args=(self._proc.stdout, self._lines),
+                         daemon=True).start()
         ready = self._read(timeout=180)
         if not ready or not ready.get("ready"):
             self._kill()
@@ -43,13 +56,13 @@ class _KokoroWorker:
                 f"kokoro worker failed to start: {(ready or {}).get('error') or 'no handshake'}")
 
     def _read(self, timeout: float) -> dict | None:
-        if not self._proc or not self._proc.stdout:
+        if not self._proc or not self._lines:
             return None
-        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
-        if not ready:
+        try:
+            line = self._lines.get(timeout=timeout)
+        except queue.Empty:
             return None
-        line = self._proc.stdout.readline()
-        if not line:
+        if line is None:
             return None
         try:
             return json.loads(line)
@@ -92,10 +105,20 @@ class _KokoroWorker:
 _WORKERS: dict[str, _KokoroWorker] = {}
 
 
+def _backend_command(backend: str, voice: dict) -> list[str]:
+    if backend == "kokoro_onnx":
+        return [sys.executable, "-m", "animal_pipeline.kokoro_onnx_worker",
+                "--model", voice["model"], "--voices", voice["voices_file"]]
+    return [sys.executable, "-m", "animal_pipeline.kokoro_worker",
+            "--model", voice["model"]]
+
+
 def _worker_for(model: str) -> _KokoroWorker:
     worker = _WORKERS.get(model)
     if worker is None:
-        worker = _WORKERS[model] = _KokoroWorker(model)
+        voice = settings()["voice"]
+        worker = _WORKERS[model] = _KokoroWorker(
+            model, command=_backend_command(voice["backend"], voice))
     return worker
 
 
@@ -107,11 +130,17 @@ def _close_workers() -> None:
 atexit.register(_close_workers)
 
 
-def _synthesize_subprocess(text: str, prefix: Path, voice: str, model: str) -> list[Path]:
-    proc = subprocess.run([sys.executable, "-m", "mlx_audio.tts.generate",
-                           "--model", model, "--voice", voice,
-                           "--text", text, "--file_prefix", str(prefix),
-                           "--audio_format", "wav"], capture_output=True, text=True, timeout=600)
+def _synthesize_subprocess(text: str, prefix: Path, voice_name: str, voice: dict) -> list[Path]:
+    if voice["backend"] == "kokoro_onnx":
+        cmd = [sys.executable, "-m", "animal_pipeline.kokoro_onnx_worker",
+               "--model", voice["model"], "--voices", voice["voices_file"],
+               "--text", text, "--voice", voice_name, "--file_prefix", str(prefix)]
+    else:
+        cmd = [sys.executable, "-m", "mlx_audio.tts.generate",
+               "--model", voice["model"], "--voice", voice_name,
+               "--text", text, "--file_prefix", str(prefix),
+               "--audio_format", "wav"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     parts = sorted(Path(p) for p in glob.glob(f"{prefix}_*.wav"))
     if proc.returncode or not parts:
         raise RuntimeError("Kokoro narration failed or produced no audio")
@@ -120,7 +149,8 @@ def _synthesize_subprocess(text: str, prefix: Path, voice: str, model: str) -> l
 
 def synthesize(text: str, dest: Path) -> Path:
     voice = settings()["voice"]
-    if voice["backend"] != "kokoro_mlx" or not voice["approved"] or not voice["name"]:
+    if voice["backend"] not in ("kokoro_mlx", "kokoro_onnx") \
+            or not voice["approved"] or not voice["name"]:
         raise RuntimeError("an explicitly approved Kokoro voice is required")
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg required")
@@ -131,7 +161,7 @@ def synthesize(text: str, dest: Path) -> Path:
     except RuntimeError:
         parts = []
     if not parts:
-        parts = _synthesize_subprocess(text, prefix, voice["name"], voice["model"])
+        parts = _synthesize_subprocess(text, prefix, voice["name"], voice)
     if len(parts) == 1:
         parts[0].replace(dest)
     else:

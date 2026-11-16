@@ -16,12 +16,15 @@ Licensing notes baked into evidence:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +35,7 @@ from .media import import_asset, probe
 
 MAX_METADATA_BYTES = 2_000_000
 MAX_MEDIA_BYTES = 500_000_000
+SEARCH_CACHE_TTL_S = 24 * 60 * 60
 SECRETS = ROOT / "secrets" / "sources.json"
 YTDLP_TIMEOUT = 300
 DOWNLOAD_TIMEOUT = 600
@@ -119,8 +123,9 @@ SOURCES: dict[str, Source] = {
             hosts=frozenset({"api.vecteezy.com", "files.vecteezy.com"}),
             kind="api",
             api_key_name="vecteezy",
-            note=("Free-tier downloads: attribution required (link to vecteezy.com), "
-                  "500/month cap. Key stored as 'vecteezy_<account>' in sources.json."),
+            note=("Free-tier production is limited to $1,000 budgets and requires attribution. "
+                  "Do not approve without item-specific budget eligibility. "
+                  "Key stored as 'vecteezy_<account>' in sources.json."),
         ),
         Source(
             key="coverr",
@@ -132,6 +137,42 @@ SOURCES: dict[str, Source] = {
             kind="api",
             api_key_name="coverr",
             note="Commercial use and modification allowed without attribution.",
+        ),
+        Source(
+            key="zenodo",
+            name="Zenodo",
+            license="Per-item (CC0/CC-BY only)",
+            license_url="https://about.zenodo.org/policies/",
+            attribution="Zenodo uploader",
+            hosts=frozenset({"zenodo.org"}),
+            kind="api",
+            note=("Research repository with per-item licenses. Only items whose "
+                  "metadata license is CC0, CC BY or public domain are imported; "
+                  "NC, ND, SA and unspecified licenses refuse at the adapter."),
+        ),
+        Source(
+            key="figshare",
+            name="Figshare",
+            license="Per-item (CC0/CC-BY only)",
+            license_url="https://help.figshare.com/article/licences",
+            attribution="Figshare uploader",
+            hosts=frozenset({"api.figshare.com", "ndownloader.figshare.com"}),
+            kind="api",
+            note=("Research supplements repository, per-item licenses. Only CC0, "
+                  "CC BY or public-domain items import; NC, ND, SA and "
+                  "unspecified licenses refuse at the adapter."),
+        ),
+        Source(
+            key="archive",
+            name="Internet Archive",
+            license="Per-item (CC0/CC-BY only)",
+            license_url="https://archive.org/about/terms.php",
+            attribution="Internet Archive uploader",
+            hosts=frozenset({"archive.org"}),
+            kind="api",
+            note=("Moving-image archive with per-item licenseurl metadata. Only "
+                  "items declaring CC0, CC BY or public domain import; missing "
+                  "or NC/ND/SA licenses refuse at the adapter."),
         ),
     )
 }
@@ -148,6 +189,34 @@ def _api_keys() -> dict:
     if not SECRETS.is_file():
         raise ValueError("no API keys: create secrets/sources.json")
     return json.loads(SECRETS.read_text())
+
+
+def _search_cache(src_key: str, query: str, limit: int) -> Path:
+    key = hashlib.sha256(json.dumps([query.casefold().strip(), limit]).encode()).hexdigest()
+    return ROOT / "cache" / "source_search" / f"{src_key}-{key}.json"
+
+
+def _cached_search(path: Path) -> list[dict] | None:
+    if not path.is_file() or time.time() - path.stat().st_mtime >= SEARCH_CACHE_TTL_S:
+        return None
+    try:
+        result = json.loads(path.read_text())
+        return result if isinstance(result, list) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _store_search(path: Path, results: list[dict]) -> list[dict]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", prefix=".search-", dir=path.parent,
+                                     delete=False) as temp:
+        temporary = Path(temp.name)
+        json.dump(results, temp)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return results
 
 
 def _ytdlp_info(url: str) -> dict:
@@ -253,36 +322,86 @@ def _vecteezy_get(acct: str, token: str, path: str) -> dict:
         return json.loads(r.read(MAX_METADATA_BYTES + 1))
 
 
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v", ".webm", ".ogv", ".mpg", ".mpeg",
+                    ".avi", ".mkv")
+
+
+def _is_video_name(name: str) -> bool:
+    return name.lower().endswith(VIDEO_EXTENSIONS)
+
+
+def _first(value) -> str:
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value) if value else ""
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
+def _allowed_item_license(name: str, url: str) -> tuple[str, str]:
+    """Map a repository item's declared license to (type, url).
+
+    Only licenses that clearly permit commercial use and derivatives pass;
+    anything else, including missing licenses, refuses the import so unclear
+    items never reach the catalog as seemingly-eligible media.
+    """
+    text = f"{name} {url}".lower()
+    for bad in ("by-nc", "-nc-", "noncommercial", "non-commercial", "by-nd",
+                "no-deriv", "by-sa", "sharealike", "gfdl"):
+        if bad in text:
+            raise ValueError(
+                f"item license '{name or url}' is not cleared for commercial derivative use")
+    if ("publicdomain/zero" in text or "publicdomain/mark" in text or
+            "cc0" in text or "cc-zero" in text or "public domain" in text):
+        return ("Public Domain / CC0",
+                url or "https://creativecommons.org/publicdomain/zero/1.0/")
+    m = re.search(r"(?:cc.by.|licenses/by/|cc by )(\d(?:\.\d)?)", text)
+    if m or "cc by" in text or "licenses/by/" in text:
+        version = m.group(1) if m else "4.0"
+        return (f"CC BY {version}",
+                url or f"https://creativecommons.org/licenses/by/{version}/")
+    raise ValueError(
+        f"item license '{name or url}' is not cleared for commercial derivative use")
+
+
 def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
     src = source(src_key)
     if not query.strip() or not 1 <= limit <= 50:
         raise ValueError("invalid query or limit")
     if src.kind != "api":
         raise ValueError(f"{src.key} has no search API; paste its page URL into source-import")
-    keys = _api_keys()
-    key = keys.get(src.api_key_name)
-    if src.key != "vecteezy" and not key:
+    keys = _api_keys() if src.api_key_name else {}
+    key = keys.get(src.api_key_name) if src.api_key_name else None
+    if src.api_key_name and src.key != "vecteezy" and not key:
         raise ValueError(f"missing {src.api_key_name} key in secrets/sources.json")
+    if src.key == "vecteezy":
+        _vecteezy_creds(keys)
+    cache = _search_cache(src_key, query, limit)
+    cached = _cached_search(cache)
+    if cached is not None:
+        return cached
     q = urllib.parse.quote_plus(query)
     if src.key == "pixabay":
         url = (f"https://pixabay.com/api/videos/?key={key}&q={q}&per_page={limit}"
                f"&safesearch=true")
         with net.bounded_open(url, set(src.hosts), name="Pixabay API") as r:
             data = json.loads(r.read(MAX_METADATA_BYTES + 1))
-        return [{"ref": str(h["id"]), "title": h.get("tags", ""), "duration": h.get("duration"),
+        return _store_search(cache, [{"ref": str(h["id"]), "title": h.get("tags", ""), "duration": h.get("duration"),
                  "page": h.get("pageURL"), "user": h.get("user")}
-                for h in data.get("hits", [])]
+                for h in data.get("hits", [])])
     if src.key == "pexels":
         req = net.bounded_request(
-            f"https://api.pexels.com/videos/search?query={q}&per_page={limit}",
+            f"https://api.pexels.com/v1/videos/search?query={q}&per_page={limit}",
             {"api.pexels.com"}, name="Pexels API",
             headers={"Authorization": key})
         with req as r:
             data = json.loads(r.read(MAX_METADATA_BYTES + 1))
-        return [{"ref": str(v["id"]), "title": v.get("url", "").rsplit("-", 1)[0].rsplit("/", 1)[-1],
+        return _store_search(cache, [{"ref": str(v["id"]), "title": v.get("url", "").rsplit("-", 1)[0].rsplit("/", 1)[-1],
                  "duration": v.get("duration"), "page": v.get("url"),
                  "user": (v.get("user") or {}).get("name")}
-                for v in data.get("videos", [])]
+                for v in data.get("videos", [])])
     if src.key == "vecteezy":
         acct, token = _vecteezy_creds(keys)
         req = net.bounded_request(
@@ -293,10 +412,10 @@ def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
         with req as r:
             data = json.loads(r.read(MAX_METADATA_BYTES + 1))
         items = data.get("resources") or data.get("data") or []
-        return [{"ref": str(i["id"]), "title": i.get("title", ""),
+        return _store_search(cache, [{"ref": str(i["id"]), "title": i.get("title", ""),
                  "page": i.get("page_url") or f"https://www.vecteezy.com/video/{i['id']}",
                  "user": i.get("contributor_name")}
-                for i in items]
+                for i in items])
     if src.key == "coverr":
         req = net.bounded_request(
             f"https://api.coverr.co/videos?query={q}&page_size={limit}",
@@ -304,16 +423,56 @@ def search(src_key: str, query: str, limit: int = 20) -> list[dict]:
         with req as r:
             data = json.loads(r.read(MAX_METADATA_BYTES + 1))
         hits = data.get("hits") or data.get("videos") or []
-        return [{"ref": h.get("id") or h.get("slug"), "title": h.get("title", ""),
+        return _store_search(cache, [{"ref": h.get("id") or h.get("slug"), "title": h.get("title", ""),
                  "duration": h.get("duration"), "page": h.get("url") or h.get("link"),
                  "user": (h.get("user") or {}).get("name") if isinstance(h.get("user"), dict) else h.get("user")}
-                for h in hits]
+                for h in hits if h.get("is_ai_generated") is False and not h.get("is_premium")])
+    if src.key == "zenodo":
+        url = f"https://zenodo.org/api/records?q={q}&size={min(limit * 3, 25)}"
+        with net.bounded_open(url, set(src.hosts), name="Zenodo API") as r:
+            data = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        results = []
+        for h in data.get("hits", {}).get("hits", []):
+            vids = [f for f in h.get("files", []) if _is_video_name(f.get("key", ""))]
+            if not vids:
+                continue
+            meta = h.get("metadata", {})
+            creators = meta.get("creators") or [{}]
+            results.append({"ref": str(h["id"]), "title": meta.get("title", ""),
+                "license": (meta.get("license") or {}).get("id"),
+                "page": f"https://zenodo.org/records/{h['id']}",
+                "user": creators[0].get("name"), "videos": len(vids)})
+            if len(results) >= limit:
+                break
+        return _store_search(cache, results)
+    if src.key == "figshare":
+        body = json.dumps({"search_for": query, "page_size": limit}).encode()
+        req = net.bounded_request(
+            "https://api.figshare.com/v2/articles/search",
+            {"api.figshare.com"}, name="Figshare API", data=body,
+            headers={"Content-Type": "application/json"})
+        with req as r:
+            data = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        return _store_search(cache, [{"ref": str(a["id"]), "title": _strip_html(a.get("title", "")),
+                "page": f"https://figshare.com/articles/{a['id']}", "user": None}
+                for a in data])
+    if src.key == "archive":
+        fields = "".join(f"&fl%5B%5D={f}" for f in
+                         ("identifier", "title", "licenseurl", "creator"))
+        url = (f"https://archive.org/advancedsearch.php?q={q}+AND+mediatype%3Amovies"
+               f"{fields}&rows={limit}&output=json")
+        with net.bounded_open(url, set(src.hosts), name="Internet Archive API") as r:
+            data = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        return _store_search(cache, [{"ref": d["identifier"], "title": _first(d.get("title")),
+                "license": _first(d.get("licenseurl")), "user": _first(d.get("creator")),
+                "page": f"https://archive.org/details/{d['identifier']}"}
+                for d in data.get("response", {}).get("docs", [])])
     return []
 
 
 def _api_import(conn: sqlite3.Connection, src: Source, ref: str, species: str, cache: Path) -> str:
-    keys = _api_keys()
-    key = keys.get(src.api_key_name)
+    keys = _api_keys() if src.api_key_name else {}
+    key = keys.get(src.api_key_name) if src.api_key_name else None
     if src.key == "vecteezy":
         acct, token = _vecteezy_creds(keys)
         detail = _vecteezy_get(acct, token, f"/resources/{urllib.parse.quote_plus(ref)}")
@@ -327,7 +486,7 @@ def _api_import(conn: sqlite3.Connection, src: Source, ref: str, species: str, c
         creator = (res.get("contributor_name") or res.get("contributor") or "Vecteezy")
         return _finish_import(conn, src, tmp_path=_download(media_url, cache), cache=cache,
                               title=title, page=page, creator=creator, species=species)
-    if not key:
+    if src.api_key_name and not key:
         raise ValueError(f"missing {src.api_key_name} key in secrets/sources.json")
     if src.key == "pixabay":
         url = f"https://pixabay.com/api/videos/?key={key}&id={urllib.parse.quote_plus(ref)}"
@@ -344,11 +503,83 @@ def _api_import(conn: sqlite3.Connection, src: Source, ref: str, species: str, c
         return _finish_import(conn, src, tmp_path=_download(pick, cache), cache=cache,
                               title=f"Pixabay video {ref}", page=h.get("pageURL") or ref,
                               creator=h.get("user") or "Pixabay", species=species)
+    if src.key == "zenodo":
+        with net.bounded_open(
+                f"https://zenodo.org/api/records/{urllib.parse.quote_plus(ref)}",
+                set(src.hosts), name="Zenodo API") as r:
+            rec = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        meta = rec.get("metadata", {})
+        lic = meta.get("license") or {}
+        lic_type, lic_url = _allowed_item_license(lic.get("id", ""), lic.get("url", ""))
+        vids = [f for f in rec.get("files", []) if _is_video_name(f.get("key", ""))]
+        if not vids:
+            raise ValueError("Zenodo record has no video file")
+        pick = min(vids, key=lambda f: f.get("size") or 0)
+        if (pick.get("size") or 0) > MAX_MEDIA_BYTES:
+            raise ValueError("Zenodo video exceeds byte limit")
+        media_url = (pick.get("links") or {}).get("self")
+        if not media_url:
+            raise ValueError("Zenodo file has no download link")
+        creators = meta.get("creators") or [{}]
+        return _finish_import(conn, src, tmp_path=_download(media_url, cache), cache=cache,
+                              title=meta.get("title") or f"Zenodo record {ref}",
+                              page=f"https://zenodo.org/records/{ref}",
+                              creator=creators[0].get("name") or "Zenodo uploader",
+                              species=species, license_type=lic_type, license_url=lic_url)
+    if src.key == "figshare":
+        with net.bounded_open(
+                f"https://api.figshare.com/v2/articles/{urllib.parse.quote_plus(ref)}",
+                {"api.figshare.com"}, name="Figshare API") as r:
+            art = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        lic = art.get("license") or {}
+        lic_type, lic_url = _allowed_item_license(lic.get("name", ""), lic.get("url", ""))
+        vids = [f for f in art.get("files", []) if _is_video_name(f.get("name", ""))]
+        if not vids:
+            raise ValueError("Figshare article has no video file")
+        pick = min(vids, key=lambda f: f.get("size") or 0)
+        if (pick.get("size") or 0) > MAX_MEDIA_BYTES:
+            raise ValueError("Figshare video exceeds byte limit")
+        if not pick.get("download_url"):
+            raise ValueError("Figshare file has no download URL")
+        authors = art.get("authors") or [{}]
+        return _finish_import(conn, src, tmp_path=_download(pick["download_url"], cache),
+                              cache=cache, title=_strip_html(art.get("title", "")) or f"Figshare article {ref}",
+                              page=f"https://figshare.com/articles/{ref}",
+                              creator=authors[0].get("full_name") or "Figshare uploader",
+                              species=species, license_type=lic_type, license_url=lic_url)
+    if src.key == "archive":
+        with net.bounded_open(
+                f"https://archive.org/metadata/{urllib.parse.quote_plus(ref)}",
+                set(src.hosts), name="Internet Archive API") as r:
+            data = json.loads(r.read(MAX_METADATA_BYTES + 1))
+        meta = data.get("metadata", {})
+        lic_type, lic_url = _allowed_item_license(
+            "", _first(meta.get("licenseurl")))
+        vids = [f for f in data.get("files", [])
+                if _is_video_name(f.get("name", "")) and f.get("format") != "Cinepack"]
+        if not vids:
+            raise ValueError("archive.org item has no video file")
+        pick = min(vids, key=lambda f: int(f.get("size") or 0))
+        if int(pick.get("size") or 0) > MAX_MEDIA_BYTES:
+            raise ValueError("archive.org video exceeds byte limit")
+        server, directory = data.get("server"), data.get("dir", "")
+        if not server or not directory:
+            raise ValueError("archive.org metadata lacks file server")
+        media_url = (f"https://{server}{directory}/"
+                     f"{urllib.parse.quote(pick['name'])}")
+        return _finish_import(conn, src, tmp_path=_download(media_url, cache, extra_hosts={server}),
+                              cache=cache, title=_first(meta.get("title")) or ref,
+                              page=f"https://archive.org/details/{ref}",
+                              creator=_first(meta.get("creator")) or "Internet Archive uploader",
+                              species=species, license_type=lic_type, license_url=lic_url)
     raise ValueError(f"import for {src.key} not implemented; download manually and use commons-import")
 
 
 def _finish_import(conn: sqlite3.Connection, src: Source, *, tmp_path: Path, cache: Path,
-                   title: str, page: str, creator: str, species: str) -> str:
+                   title: str, page: str, creator: str, species: str,
+                   license_type: str | None = None, license_url: str | None = None) -> str:
+    license_type = license_type or src.license
+    license_url = license_url or src.license_url
     cache.mkdir(parents=True, exist_ok=True)
     try:
         probe(tmp_path)
@@ -362,15 +593,15 @@ def _finish_import(conn: sqlite3.Connection, src: Source, *, tmp_path: Path, cac
             return existing["id"]
         if not path.exists():
             tmp_path.replace(path)
-        evidence = json.dumps({"item": page, "license": src.license_url,
+        evidence = json.dumps({"item": page, "license": license_url,
                                "creator": creator, "source": src.key,
                                "note": src.note, "retrieved_at": now()})
-        credit = (f"{creator}, {title}, {src.license}, {page}; "
+        credit = (f"{creator}, {title}, {license_type}, {page}; "
                   f"courtesy {src.attribution}; edited by Naminal Hub")
         # Restrictions is a hard rights gate reserved for per-item problems
         # the operator must clear; source policy notes stay in evidence.
         return import_asset(conn, path, source_ref=page, creator=creator,
-                            license_type=src.license, evidence=evidence,
+                            license_type=license_type, evidence=evidence,
                             attribution=credit, species=species,
                             commercial=True, modifications=True)
     finally:

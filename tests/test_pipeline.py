@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from animal_pipeline import analytics, budget, competitors, creative, editor, evidence, media, review, scheduler, server
 from animal_pipeline.core import connect
@@ -20,11 +21,11 @@ def conn(tmp_path):
 
 
 @pytest.fixture
-def footage(tmp_path):
+def footage(tmp_path, h264_enc):
     path = tmp_path / "fixture.mp4"
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=3",
-                    "-c:v", "h264_videotoolbox", "-b:v", "1M", str(path)],
+                    "-c:v", h264_enc, "-b:v", "1M", str(path)],
                    check=True, timeout=60)
     return path
 
@@ -93,6 +94,21 @@ def test_missing_or_expired_rights(conn, setup):
         creative.save_plan(conn, plan(topic, fact, asset))
 
 
+def test_rejected_media_is_preserved_but_not_offered_for_approval(conn, footage):
+    asset = media.import_asset(conn, footage, source_ref="local:still-image",
+                               creator="Test operator", license_type="original",
+                               evidence="test fixture", attribution="Test operator",
+                               species="Dolphin", commercial=True, modifications=True)
+    media.reject_asset(conn, asset, "Still image with wave effect, not real footage")
+    row = conn.execute("SELECT * FROM assets WHERE id=?", (asset,)).fetchone()
+    assert row["rejected"] and row["rejection_reason"].startswith("Still image")
+    assert Path(row["path"]).is_file()
+    assert "asset rejected" in media.rights_errors(row)[0]
+    assert asset not in server.triage_page(conn)
+    with pytest.raises(ValueError, match="asset rejected"):
+        media.approve_asset(conn, asset)
+
+
 def test_source_revision_and_approval_invalidation(conn, setup):
     topic, fact, asset = setup
     first = creative.save_plan(conn, plan(topic, fact, asset))
@@ -137,7 +153,50 @@ def test_local_export_includes_thumbnail_and_exact_revision(conn, setup, tmp_pat
     result = review.export(conn, identifier, "youtube")
     folder = Path(result["directory"])
     assert (folder / "thumbnail.jpg").is_file()
+    assert result["thumbnail_source"]["full_bleed"]
+    with Image.open(folder / "thumbnail.jpg") as image:
+        assert image.size == (1080, 1920)
     assert digest(folder / "Naminal_Hub.mp4") == video_hash
+
+
+def test_framing_target_requires_reason_for_all_blurred_shots(conn, setup):
+    topic, fact, asset = setup
+    candidate = plan(topic, fact, asset)
+    candidate["segments"][0]["zoom"] = 0.82
+    with pytest.raises(ValueError, match="15% target"):
+        creative.save_plan(conn, candidate)
+    candidate["full_frame_unavailable_reason"] = "Animal becomes soft when cropped to 9:16"
+    identifier = creative.save_plan(conn, candidate)
+    saved = json.loads(conn.execute("SELECT content FROM plans WHERE id=?",
+                                     (identifier,)).fetchone()[0])
+    assert saved["visual_mix"]["full_frame_fraction"] == 0
+
+
+def test_focused_cover_shot_is_selected_for_thumbnail(conn, setup, tmp_path, monkeypatch):
+    from animal_pipeline.core import digest
+    topic, fact, asset = setup
+    candidate = plan(topic, fact, asset)
+    shot = candidate["segments"][0]
+    shot.update({"duration_s": 0.5, "zoom": 1, "full_frame_focus_ok": True,
+                 "thumbnail_candidate": True, "thumbnail_at_s": 0.25})
+    candidate["segments"].append({"text": shot["text"], "fact_ids": [fact],
+                                  "asset_id": asset, "start_s": 0.5,
+                                  "duration_s": 1.5, "zoom": 0.82})
+    identifier = creative.save_plan(conn, candidate)
+    saved = json.loads(conn.execute("SELECT content FROM plans WHERE id=?",
+                                     (identifier,)).fetchone()[0])
+    assert saved["visual_mix"]["full_frame_fraction"] == 0.25
+    video = Path(conn.execute("SELECT path FROM assets WHERE id=?", (asset,)).fetchone()[0])
+    video_hash = digest(video)
+    conn.execute("UPDATE plans SET status='APPROVED',video_path=?,video_hash=?,approved_hash=? "
+                 "WHERE id=?", (str(video), video_hash, video_hash, identifier))
+    monkeypatch.setattr(review, "ROOT", tmp_path)
+    monkeypatch.setattr(review, "review_errors", lambda connection, row: [])
+    package = review.export(conn, identifier, "youtube")
+    assert package["thumbnail_source"]["matches_full_frame_shot"]
+    assert package["thumbnail_source"]["source_time_s"] == 0.25
+    with Image.open(Path(package["directory"]) / "thumbnail.jpg") as image:
+        assert image.size == (1080, 1920)
 
 
 def test_queue_recovery_and_idempotence(conn, setup):
@@ -702,6 +761,7 @@ def test_review_ui_escapes_and_shows_gates(conn, setup):
     assert "Unknown plan" in server.review_page(conn, "nope")
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 def test_launchd_plist_is_deterministic_and_bounded(tmp_path):
     from animal_pipeline import service
     content = service.plist(Path("/opt/naminal"), interval_s=3600, limit=2)
@@ -746,6 +806,7 @@ def test_triage_page_lists_pending_verification_commands(conn, setup):
     assert fact not in page  # approved facts need no action
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd is macOS-only")
 def test_service_pause_resume_and_health(tmp_path, monkeypatch):
     from animal_pipeline import service
     calls = []
@@ -832,7 +893,7 @@ def clip(tmp_path, name, seconds):
     path = tmp_path / name
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-f", "lavfi", "-i", f"testsrc2=s=320x240:r=30:d={seconds}",
-                    "-c:v", "h264_videotoolbox", "-b:v", "1M", str(path)],
+                    "-c:v", media.h264_encoder(), "-b:v", "1M", str(path)],
                    check=True, timeout=120)
     return path
 

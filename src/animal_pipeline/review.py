@@ -7,6 +7,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from PIL import Image
+
 from .core import ROOT, digest, settings
 from .editor import plan_min_duration
 from .evidence import validate_segments
@@ -14,6 +16,21 @@ from .media import probe, rights_errors
 
 PLATFORMS = ("youtube", "tiktok", "instagram")
 REQUIRED_ATTESTATIONS = ("facts", "visuals", "rights", "audio")
+
+
+def _thumbnail_choice(plan: dict, assets: list[sqlite3.Row]) -> tuple[dict, sqlite3.Row, float]:
+    choices = list(zip(plan["segments"], assets))
+    if not choices:
+        raise ValueError("no footage available for a full-bleed thumbnail")
+    _, (shot, asset) = max(enumerate(choices), key=lambda item: (
+        bool(item[1][0].get("full_frame_focus_ok")),
+        bool(item[1][0].get("thumbnail_candidate")),
+        float(item[1][0].get("zoom", 1)) >= 0.999,
+        item[1][1]["width"] * item[1][1]["height"],
+        -item[0]))
+    at = float(shot.get("thumbnail_at_s", float(shot["start_s"]) +
+                        float(shot["duration_s"]) / 2))
+    return shot, asset, at
 
 
 def review_errors(conn: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
@@ -85,6 +102,12 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
     plan = json.loads(row["content"])
     assets = [conn.execute("SELECT * FROM assets WHERE id=?", (s["asset_id"],)).fetchone()
               for s in plan["segments"]]
+    thumbnail_shot, thumbnail_asset, thumbnail_at = _thumbnail_choice(plan, assets)
+    thumbnail_meta = {"asset_id": thumbnail_asset["id"], "source_time_s": thumbnail_at,
+                      "full_bleed": True,
+                      "matches_full_frame_shot": float(thumbnail_shot.get("zoom", 1)) >= 0.999,
+                      "focus_verified": thumbnail_shot.get("full_frame_focus_ok") is True,
+                      "visual_review_required": True}
     species = conn.execute("SELECT species FROM topics WHERE id=?",
                            (plan["topic_id"],)).fetchone()["species"]
     species_tag = "#" + "".join(w.capitalize() for w in species.split())
@@ -98,8 +121,10 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
                "title": plan["title"], "description": description,
                "hashtags": hashtags,
                "thumbnail": "thumbnail.jpg",
+               "thumbnail_source": thumbnail_meta,
                "attribution": sorted({a["attribution"] for a in assets if a["attribution"]}),
                "disclosure_checklist": ["Confirm species, rights and facts",
+                                        "Inspect full-bleed thumbnail for focus and subject framing",
                                         "Review synthetic-media disclosures",
                                         "Operator uploads manually"]}
     if dry_run:
@@ -113,14 +138,21 @@ def export(conn: sqlite3.Connection, plan_id: str, platform: str, *,
         shutil.copyfile(row["video_path"], video_tmp)
         if digest(video_tmp) != row["video_hash"]:
             raise RuntimeError("export copy hash mismatch")
-        thumbnail_time = min(3, probe(video_tmp)["duration"] / 2)
+        render_cfg = settings()["render"]
+        width, height = render_cfg["width"], render_cfg["height"]
+        focus = max(0.0, min(1.0, float(thumbnail_shot.get("focus_x", 0.5))))
         result = subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-ss", str(thumbnail_time), "-i", str(video_tmp),
+             "-ss", str(thumbnail_at), "-i", thumbnail_asset["path"],
+             "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height}:x=(iw-{width})*{focus:.3f}:y=(ih-{height})/2",
              "-frames:v", "1", str(image_tmp)],
             capture_output=True, text=True, timeout=120)
         if result.returncode or not image_tmp.is_file():
             raise RuntimeError("could not create export thumbnail")
+        with Image.open(image_tmp) as image:
+            if image.size != (width, height):
+                raise RuntimeError("thumbnail is not full-bleed vertical output")
         json_tmp.write_text(json.dumps(package, indent=2))
         os.replace(video_tmp, dest / "Naminal_Hub.mp4")
         os.replace(image_tmp, dest / "thumbnail.jpg")

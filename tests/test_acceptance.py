@@ -1,21 +1,23 @@
 import asyncio
 import json
 import subprocess
+from array import array
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageStat
 
 from animal_pipeline import analytics, creative, editor, evidence, media, review, scheduler
 from animal_pipeline.core import connect, digest
 
 
 @pytest.fixture
-def footage(tmp_path):
+def footage(tmp_path, h264_enc):
     path = tmp_path / "fennec.mp4"
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                     "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=30",
-                    "-c:v", "h264_videotoolbox", "-b:v", "1M", str(path)],
+                    "-c:v", h264_enc, "-b:v", "1M", str(path)],
                    check=True, timeout=120)
     return path
 
@@ -80,6 +82,34 @@ def test_multi_day_desk_cycle(tmp_path, monkeypatch, footage):
     results = asyncio.run(scheduler.drain(conn, editor.compose, limit=4))
     assert results[0]["result"]["qc"]["ok"]
     assert results[0]["result"]["qc"]["checks"]["loudness"]
+    render = results[0]["result"]
+    assert render["manifest"]["branding"]["logo_sha256"]
+    assert render["manifest"]["story_duration"] == 24.0
+    assert abs(render["manifest"]["duration"] - 26.0) < 0.2
+    end_frame = tmp_path / "outro.png"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", "25", "-i", render["video"], "-frames:v", "1", str(end_frame)],
+                   check=True, timeout=60)
+    with Image.open(end_frame) as image:
+        assert max(image.convert("RGB").getpixel((40, 40))) < 12
+        assert max(image.convert("RGB").getpixel((540, 960))) > 30
+    pulse_frames = []
+    for index, second in enumerate((24.35, 24.60)):
+        frame = tmp_path / f"outro-pulse-{index}.png"
+        subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", str(second), "-i", render["video"],
+                        "-frames:v", "1", str(frame)], check=True, timeout=60)
+        with Image.open(frame) as image:
+            pulse_frames.append((
+                ImageStat.Stat(image.crop((150, 1280, 930, 1450))).mean[0],
+                ImageStat.Stat(image.crop((480, 900, 600, 1020))).mean[0]))
+    assert pulse_frames[1][0] > pulse_frames[0][0] * 1.3
+    assert abs(pulse_frames[1][1] - pulse_frames[0][1]) < 3
+    ping = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "24.2",
+                           "-t", "0.2", "-i", render["video"], "-vn", "-f", "s16le",
+                           "-acodec", "pcm_s16le", "pipe:1"],
+                          capture_output=True, check=True, timeout=60)
+    assert max(abs(sample) for sample in array("h", ping.stdout)) > 1000
     snapshot = results[0]["result"]["manifest"]["evidence_snapshot"]
     assert {f["id"] for f in snapshot["facts"]} == set(facts)
     assert all(f["status"] == "approved" and f["sha256"] for f in snapshot["facts"])
@@ -90,6 +120,9 @@ def test_multi_day_desk_cycle(tmp_path, monkeypatch, footage):
                    verified=("facts", "visuals", "rights", "audio"))
     package = review.export(conn, plan_id, "youtube")
     exported = Path(package["directory"]) / "Naminal_Hub.mp4"
+    assert digest(exported) == row["video_hash"]
+    with pytest.raises(ValueError, match="immutable"):
+        editor.compose(conn, plan_id)
     assert digest(exported) == row["video_hash"]
 
     # Day 3: analytics steer ranking; a superseded fact revokes approval

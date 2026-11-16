@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import plistlib
 import subprocess
 from pathlib import Path
@@ -9,6 +10,11 @@ from .core import ROOT, settings
 
 LABEL = "ai.naminal.desk"
 AGENTS = Path.home() / "Library" / "LaunchAgents"
+
+
+def _macos_only() -> None:
+    if platform.system() != "Darwin":
+        raise RuntimeError("scheduled launchd service is supported on macOS only")
 
 
 def plist(root: Path, interval_s: int, limit: int) -> str:
@@ -28,6 +34,7 @@ def plist(root: Path, interval_s: int, limit: int) -> str:
 
 
 def install(root: Path, agents_dir: Path, *, install_launchctl: bool = True) -> dict:
+    _macos_only()
     cfg = settings()["service"]
     agents_dir.mkdir(parents=True, exist_ok=True)
     (root / "output" / "logs").mkdir(parents=True, exist_ok=True)
@@ -48,6 +55,7 @@ def install(root: Path, agents_dir: Path, *, install_launchctl: bool = True) -> 
 
 
 def status() -> dict:
+    _macos_only()
     result = subprocess.run(
         ["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
         capture_output=True, text=True, timeout=30)
@@ -58,6 +66,7 @@ def status() -> dict:
 
 
 def uninstall() -> dict:
+    _macos_only()
     result = subprocess.run(
         ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
         capture_output=True, text=True, timeout=30)
@@ -73,6 +82,7 @@ def _paused_marker(root: Path) -> Path:
 
 def pause(root: Path) -> dict:
     """Stop future runs without removing the installed agent."""
+    _macos_only()
     (root / "output" / "logs").mkdir(parents=True, exist_ok=True)
     _paused_marker(root).write_text("paused\n")
     result = subprocess.run(
@@ -83,6 +93,7 @@ def pause(root: Path) -> dict:
 
 
 def resume(root: Path) -> dict:
+    _macos_only()
     _paused_marker(root).unlink(missing_ok=True)
     result = subprocess.run(
         ["launchctl", "enable", f"gui/{os.getuid()}/{LABEL}"],

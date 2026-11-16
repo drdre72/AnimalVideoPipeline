@@ -10,6 +10,9 @@ benchmark_channels:
 # its family; a species-tagged clip never satisfies a generic tag on a
 # specific topic. Only additive entries — exact species always matches.
 taxonomy:
+  Octopus:
+    - Day octopus
+    - Coconut octopus
   Mantis shrimp:
     - Mantis shrimp
     - Peacock mantis shrimp

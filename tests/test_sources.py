@@ -93,3 +93,141 @@ def test_api_import_requires_key(tmp_path, monkeypatch):
     conn = connect(tmp_path / "t.db")
     with pytest.raises(ValueError, match="missing pexels key"):
         sources._api_import(conn, sources.source("pexels"), "1", "Bird", tmp_path / "c")
+
+
+def test_search_caches_normalized_results_without_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(sources, "ROOT", tmp_path)
+    monkeypatch.setattr(sources, "_api_keys", lambda: {"pixabay": "private-test-key"})
+    calls = []
+
+    def respond(url, hosts, **kw):
+        calls.append(url)
+        return io.BytesIO(json.dumps({"hits": [{"id": 42, "tags": "otter",
+                                                "pageURL": "https://pixabay.com/videos/42"}]}).encode())
+
+    monkeypatch.setattr(sources.net, "bounded_open", respond)
+    assert sources.search("pixabay", "sea otter", limit=5) == sources.search(
+        "pixabay", "sea otter", limit=5)
+    assert len(calls) == 1
+    cache_files = list((tmp_path / "cache/source_search").glob("*.json"))
+    assert len(cache_files) == 1
+    assert "private-test-key" not in cache_files[0].read_text()
+
+
+def test_coverr_search_excludes_ai_and_premium(tmp_path, monkeypatch):
+    monkeypatch.setattr(sources, "ROOT", tmp_path)
+    monkeypatch.setattr(sources, "_api_keys", lambda: {"coverr": "private-test-key"})
+    items = [{"id": "real", "title": "Otter", "is_ai_generated": False,
+              "is_premium": False},
+             {"id": "ai", "title": "Generated", "is_ai_generated": True},
+             {"id": "unknown", "title": "Unclassified"},
+             {"id": "premium", "title": "Paid", "is_ai_generated": False,
+              "is_premium": True}]
+    monkeypatch.setattr(sources.net, "bounded_request", lambda *a, **k:
+                        io.BytesIO(json.dumps({"hits": items}).encode()))
+    assert [item["ref"] for item in sources.search("coverr", "otter", limit=4)] == ["real"]
+
+
+def test_item_license_gate():
+    assert sources._allowed_item_license("cc-by-4.0", "")[0] == "CC BY 4.0"
+    assert sources._allowed_item_license("CC BY 3.0", "https://x")[0] == "CC BY 3.0"
+    assert sources._allowed_item_license("cc-zero", "")[0] == "Public Domain / CC0"
+    assert sources._allowed_item_license("", "https://creativecommons.org/publicdomain/mark/1.0/")[0] == "Public Domain / CC0"
+    for bad in ("cc-by-nc-4.0", "CC BY-NC-ND", "cc-by-sa-4.0", "", "notspecified",
+                "mit-license", "other-open"):
+        with pytest.raises(ValueError, match="not cleared"):
+            sources._allowed_item_license(bad, "")
+
+
+def test_zenodo_import_uses_item_license(tmp_path, monkeypatch):
+    clip = _sine(tmp_path / "clip.mp4")
+    record = {"metadata": {"title": "Beetle fight", "license": {"id": "cc-by-4.0"},
+                           "creators": [{"name": "Dr Science"}]},
+              "files": [{"key": "fight.mp4", "size": 100,
+                         "links": {"self": "https://zenodo.org/api/records/1/files/fight.mp4/content"}},
+                        {"key": "data.csv", "size": 50, "links": {}}]}
+    monkeypatch.setattr(sources.net, "bounded_open",
+                        lambda *a, **k: io.BytesIO(json.dumps(record).encode()))
+    monkeypatch.setattr(sources, "_download", lambda url, dest, **k: clip)
+    conn = connect(tmp_path / "t.db")
+    aid = sources._api_import(conn, sources.source("zenodo"), "10682701", "Beetle", tmp_path / "c")
+    asset = conn.execute("SELECT * FROM assets WHERE id=?", (aid,)).fetchone()
+    assert asset["license_type"] == "CC BY 4.0" and asset["creator"] == "Dr Science"
+    assert "creativecommons.org" in json.loads(asset["evidence"])["license"]
+
+
+def test_zenodo_refuses_uncleared_license(tmp_path, monkeypatch):
+    record = {"metadata": {"title": "NC study", "license": {"id": "cc-by-nc-4.0"}},
+              "files": [{"key": "v.mp4", "size": 1, "links": {"self": "https://zenodo.org/x"}}]}
+    monkeypatch.setattr(sources.net, "bounded_open",
+                        lambda *a, **k: io.BytesIO(json.dumps(record).encode()))
+    conn = connect(tmp_path / "t.db")
+    with pytest.raises(ValueError, match="not cleared"):
+        sources._api_import(conn, sources.source("zenodo"), "1", "Bird", tmp_path / "c")
+
+
+def test_figshare_import_uses_item_license(tmp_path, monkeypatch):
+    clip = _sine(tmp_path / "clip.mp4")
+    article = {"title": "<b>Pika</b> observation",
+               "license": {"name": "CC BY 4.0", "url": "https://creativecommons.org/licenses/by/4.0/"},
+               "authors": [{"full_name": "A. Researcher"}],
+               "files": [{"name": "notes.txt", "size": 5},
+                         {"name": "pika.webm", "size": 200,
+                          "download_url": "https://ndownloader.figshare.com/files/9"}]}
+    monkeypatch.setattr(sources.net, "bounded_open",
+                        lambda *a, **k: io.BytesIO(json.dumps(article).encode()))
+    monkeypatch.setattr(sources, "_download", lambda url, dest, **k: clip)
+    conn = connect(tmp_path / "t.db")
+    aid = sources._api_import(conn, sources.source("figshare"), "99", "Pika", tmp_path / "c")
+    asset = conn.execute("SELECT * FROM assets WHERE id=?", (aid,)).fetchone()
+    assert asset["license_type"] == "CC BY 4.0" and asset["creator"] == "A. Researcher"
+
+
+def test_archive_import_uses_licenseurl_and_mirror(tmp_path, monkeypatch):
+    clip = _sine(tmp_path / "clip.mp4")
+    metadata = {"server": "ia801409.us.archive.org", "dir": "/0/items/film",
+                "metadata": {"title": "Old Wildlife Film", "creator": "EB Films",
+                             "licenseurl": "https://creativecommons.org/licenses/by/3.0/"},
+                "files": [{"name": "film.avi", "format": "Cinepack", "size": "9"},
+                          {"name": "film.mp4", "format": "h.264", "size": "500"}]}
+    monkeypatch.setattr(sources.net, "bounded_open",
+                        lambda *a, **k: io.BytesIO(json.dumps(metadata).encode()))
+    calls = []
+    monkeypatch.setattr(sources, "_download",
+                        lambda url, dest, **k: calls.append((url, k)) or clip)
+    conn = connect(tmp_path / "t.db")
+    aid = sources._api_import(conn, sources.source("archive"), "film", "Otter", tmp_path / "c")
+    asset = conn.execute("SELECT * FROM assets WHERE id=?", (aid,)).fetchone()
+    assert asset["license_type"] == "CC BY 3.0"
+    assert calls[0][0] == "https://ia801409.us.archive.org/0/items/film/film.mp4"
+    assert calls[0][1]["extra_hosts"] == {"ia801409.us.archive.org"}
+
+
+def test_archive_import_requires_item_license(tmp_path, monkeypatch):
+    metadata = {"server": "s.us.archive.org", "dir": "/d",
+                "metadata": {"title": "No license"},
+                "files": [{"name": "v.mp4", "size": "10"}]}
+    monkeypatch.setattr(sources.net, "bounded_open",
+                        lambda *a, **k: io.BytesIO(json.dumps(metadata).encode()))
+    conn = connect(tmp_path / "t.db")
+    with pytest.raises(ValueError, match="not cleared"):
+        sources._api_import(conn, sources.source("archive"), "v", "Otter", tmp_path / "c")
+
+
+def test_vecteezy_free_assets_require_budget_clearance(tmp_path, monkeypatch):
+    clip = _sine(tmp_path / "clip.mp4")
+    from animal_pipeline import media
+    aid_conn = connect(tmp_path / "t.db")
+    aid = media.import_asset(aid_conn, clip, source_ref="https://www.vecteezy.com/video/42",
+                             creator="Maker", license_type="Vecteezy License (free tier)",
+                             evidence="License page", attribution="Maker",
+                             species="Otter", commercial=True, modifications=True)
+    asset = aid_conn.execute("SELECT * FROM assets WHERE id=?", (aid,)).fetchone()
+
+    monkeypatch.setattr(media, "settings", lambda: {"vecteezy": {"budget_verified": False}})
+    assert "Vecteezy free-tier production budget not verified" in media.rights_errors(asset)
+    with pytest.raises(ValueError, match="budget"):
+        media.approve_asset(aid_conn, aid)
+
+    monkeypatch.setattr(media, "settings", lambda: {"vecteezy": {"budget_verified": True}})
+    assert "Vecteezy free-tier production budget not verified" not in media.rights_errors(asset)

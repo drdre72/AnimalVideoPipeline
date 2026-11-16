@@ -78,6 +78,9 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("asset_id")
     rights = sub.add_parser("verify-rights", help="Operator confirms rights evidence")
     rights.add_argument("asset_id")
+    reject_asset = sub.add_parser("reject-asset", help="Reject an unapproved media asset")
+    reject_asset.add_argument("asset_id")
+    reject_asset.add_argument("--reason", required=True)
     plan = sub.add_parser("plan", help="Generate plan with local Ollama from approved evidence")
     plan.add_argument("topic_id")
     draft = sub.add_parser("draft", help="Validate and store a structured local plan JSON")
@@ -144,34 +147,46 @@ def _ollama_up(cfg: dict) -> bool:
         return False
 
 
+def _tts_ready(cfg: dict) -> bool:
+    import importlib.util
+    voice = cfg["voice"]
+    if voice["backend"] == "kokoro_mlx":
+        return importlib.util.find_spec("mlx_audio") is not None
+    if voice["backend"] == "kokoro_onnx":
+        model, voices_file = Path(voice["model"]), Path(voice.get("voices_file", ""))
+        if not model.is_absolute():
+            model = ROOT / model
+        if not voices_file.is_absolute():
+            voices_file = ROOT / voices_file
+        return (importlib.util.find_spec("kokoro_onnx") is not None
+                and model.is_file() and voices_file.is_file())
+    return False
+
+
 def doctor() -> dict:
     cfg = settings()
     encoders = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=30
                               ).stdout if shutil.which("ffmpeg") else ""
-    kokoro = False
-    try:
-        import mlx_audio  # noqa: F401
-        kokoro = True
-    except ImportError:
-        pass
     free_gb = round(shutil.disk_usage(ROOT).free / 1024**3, 1)
-    required = {"macos_arm64": platform.system() == "Darwin" and platform.machine() == "arm64",
+    required = {"platform_supported": platform.system() in ("Darwin", "Windows", "Linux"),
                 "ffmpeg": bool(shutil.which("ffmpeg")),
                 "ffprobe": bool(shutil.which("ffprobe")),
-                "videotoolbox_encoder": "h264_videotoolbox" in encoders,
+                "h264_encoder": any(e in encoders for e in media._H264_ENCODERS),
                 "whisper": bool(shutil.which("whisper-cli")),
                 "whisper_model": (ROOT / cfg["alignment"]["model_path"]).is_file(),
-                "kokoro_importable": kokoro,
+                "tts_backend_ready": _tts_ready(cfg),
                 "voice_approved": cfg["voice"]["approved"],
                 "disk_free": free_gb >= cfg["storage"]["min_free_gb"]}
     optional = {"ollama_installed": bool(shutil.which("ollama")),
                 "ollama_reachable": _ollama_up(cfg),
                 "youtube_authorized": bool(google_auth.load_store().get("refresh_token")),
                 "youtube_configured": bool(google_auth.load_store().get("client_id")),
-                "launchd_installed": (service.AGENTS / f"{service.LABEL}.plist").is_file()}
+                "launchd_installed": (service.AGENTS / f"{service.LABEL}.plist").is_file()
+                if platform.system() == "Darwin" else False}
     return {"required": required, "optional": optional,
             "ok": all(required.values()),
             "missing_required": sorted(k for k, v in required.items() if not v),
+            "platform": platform.system(),
             "machine": platform.machine(), "free_gb": free_gb,
             "publishing_enabled": False}
 
@@ -240,6 +255,9 @@ def dispatch(args: argparse.Namespace) -> object:
         if args.command == "verify-rights":
             media.approve_asset(conn, args.asset_id)
             return "rights approved after operator verification"
+        if args.command == "reject-asset":
+            media.reject_asset(conn, args.asset_id, args.reason)
+            return "asset rejected; source and evidence retained"
         if args.command == "plan":
             return creative.generate_plan(conn, args.topic_id)
         if args.command == "draft":

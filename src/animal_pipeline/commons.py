@@ -10,7 +10,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import net
+from . import net, sources
 from .core import digest, now
 from .media import import_asset, probe
 
@@ -25,6 +25,8 @@ LICENSES = {
     "CC BY 4.0": "/licenses/by/4.0",
     "CC0": "/publicdomain/zero/1.0",
     "CC0 1.0": "/publicdomain/zero/1.0",
+    "Public domain": "/publicdomain/mark/1.0",
+    "PDM": "/publicdomain/mark/1.0",
 }
 LICENSE_HOST = "creativecommons.org"
 LICENSE_SUFFIXES = re.compile(r"/(?:deed\.[a-zA-Z.]+|legalcode(?:\.[a-zA-Z]+)?)$")
@@ -33,8 +35,14 @@ LICENSE_SUFFIXES = re.compile(r"/(?:deed\.[a-zA-Z.]+|legalcode(?:\.[a-zA-Z]+)?)$
 def _license_url_ok(name: str, url: str) -> bool:
     canonical = LICENSES.get(name)
     parsed = urllib.parse.urlsplit(url.rstrip("/"))
-    if not canonical or parsed.hostname != LICENSE_HOST or not parsed.path:
+    if not canonical or not parsed.path:
         return False
+    if parsed.hostname != LICENSE_HOST:
+        # PD-template items may point back at the Commons file page itself;
+        # accept only that host for name-only public-domain assertions.
+        return (name in ("Public domain", "PDM")
+                and parsed.hostname == API_HOST
+                and parsed.path.startswith("/wiki/File:"))
     path = LICENSE_SUFFIXES.sub("", parsed.path.rstrip("/"))
     return path == canonical
 MEDIA_HOST = "upload.wikimedia.org"
@@ -61,6 +69,10 @@ def _api(params: dict) -> dict:
 def search(query: str, limit: int = 20) -> list[str]:
     if not query.strip() or not 1 <= limit <= 50:
         raise ValueError("invalid Commons query or limit")
+    cache = sources._search_cache("commons", query, limit)
+    cached = sources._cached_search(cache)
+    if cached is not None:
+        return cached
     data = _api({"action": "query", "list": "search", "srnamespace": "6",
                  "srsearch": query + " filetype:video", "srlimit": str(limit)})
     seen, titles = set(), []
@@ -69,7 +81,7 @@ def search(query: str, limit: int = 20) -> list[str]:
         if title.lower().endswith((".ogv", ".webm", ".mp4")) and title not in seen:
             seen.add(title)
             titles.append(title)
-    return titles
+    return sources._store_search(cache, titles)
 
 
 def _plain(value: str) -> str:
@@ -94,6 +106,10 @@ def _details(title: str) -> dict:
     metadata = image.get("extmetadata", {})
     license_name = _plain(metadata.get("LicenseShortName", {}).get("value", ""))
     license_url = _plain(metadata.get("LicenseUrl", {}).get("value", "")).rstrip("/")
+    if not license_url and license_name in ("Public domain", "PDM"):
+        # Commons PD-template files often omit LicenseUrl; the file page itself
+        # carries the PD rationale and stays the item-specific evidence.
+        license_url = source_ref
     if not _license_url_ok(license_name, license_url):
         raise ValueError("unknown or restricted Commons license")
     if _plain(metadata.get("Restrictions", {}).get("value", "")):

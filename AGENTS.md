@@ -5,6 +5,9 @@
 - `uv sync --no-editable --extra dev`;
   `uv run --no-editable --extra dev pytest`;
   `uv run --no-editable python main.py doctor`.
+- Cross-platform: macOS and Windows are supported; `docs/WINDOWS.md` covers
+  Windows setup. TTS defaults to `kokoro_onnx` (portable, CPU); `kokoro_mlx`
+  remains the Apple Silicon alternative. `service` commands are launchd-only.
 - SQLite is authoritative: keep facts and revisions append-only, use atomic
   transactions, never silently discard sources, media or failed jobs.
 - Factual narration must cite approved, current Fact IDs. Citation existence
@@ -21,3 +24,6 @@
   at approval and export. Read-only CLI commands never change external state.
 - Definition of done: offline tests pass, real FFprobe validation for MP4,
   source and rights manifests, explicit hardware validation status.
+- For any video-production task, follow `DEVIN.md`: preflight footage and
+  narration before rendering, then personally inspect every new render
+  before responding, including QC failures. Never call an unseen render done.
