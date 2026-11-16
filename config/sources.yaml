@@ -1,0 +1,5 @@
+research:
+  network_enabled: false
+  allowed_hosts: []
+media:
+  downloads_enabled: false

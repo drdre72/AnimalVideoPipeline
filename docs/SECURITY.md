@@ -3,10 +3,16 @@
 Untrusted scientific excerpts, model text, metadata and media paths can
 inject instructions or malformed input. Treat all as data. Never run
 generated shell commands; FFmpeg uses bounded argv calls. Only local files
-with recorded hashes enter renders. No crawler or downloader is needed for
-the initial rights workflow. HTTPS and strict host/byte limits are required
-before adding any remote importer. Never log OAuth credentials or private
-configuration; keep them out of this repository.
+with recorded hashes enter renders. The opt-in Commons importer pins the
+official API and upload hosts (including redirects), verifies HTTPS and
+applies separate metadata and video byte ceilings. It rejects unrecognized
+or restricted licenses and leaves imported assets unapproved. Research
+ingestion shares the same `net.py` boundary: Wikipedia API host only, HTTPS
+plus redirect validation and a response byte ceiling. Extract sentences land
+as `proposed` facts with verbatim excerpts — never approved — and article
+content is parsed as data, never executed or templated into prompts.
+Never log OAuth credentials or private configuration; keep them out of this
+repository.
 
 Threats: unsupported science, fraudulent/expired licenses, species mismatch,
 misleading cropping, synthetic wildlife misrepresented as real, stale
